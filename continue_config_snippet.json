@@ -1,0 +1,12 @@
+{
+  "mcpServers": [
+    {
+      "name": "flowsentinel",
+      "transport": {
+        "type": "stdio",
+        "command": "/absolute/path/to/mcp-flowsentinel",
+        "args": []
+      }
+    }
+  ]
+}

@@ -3,9 +3,7 @@ package capture
 import (
 	"context"
 	"fmt"
-	"io"
 
-	"github.com/google/gopacket"
 	"github.com/google/gopacket/pcap"
 )
 
@@ -51,40 +49,6 @@ func (r OfflineReader) Read(ctx context.Context) (<-chan PacketEvent, error) {
 	}
 
 	ch := make(chan PacketEvent, 4096)
-	go func() {
-		defer close(ch)
-		defer handle.Close()
-
-		src := gopacket.NewPacketSource(handle, handle.LinkType())
-		src.NoCopy = true
-
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			default:
-			}
-
-			pkt, err := src.NextPacket()
-			if err == io.EOF {
-				return // file fully consumed
-			}
-			if err != nil {
-				continue // skip malformed packets
-			}
-
-			event := parsePacket(pkt)
-			if event == nil {
-				continue
-			}
-
-			select {
-			case ch <- *event:
-			case <-ctx.Done():
-				return
-			}
-		}
-	}()
-
+	go drainPackets(ctx, handle, ch, true)
 	return ch, nil
 }

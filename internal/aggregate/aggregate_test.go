@@ -49,15 +49,14 @@ func TestBeaconingScore_Irregular(t *testing.T) {
 }
 
 func TestBeaconingScore_TooFew(t *testing.T) {
-	// Fewer than 5 packets → cannot determine beaconing.
+	// Fewer than 3 packets → cannot compute inter-arrival variance.
 	ts := []time.Time{
 		time.Now(),
 		time.Now().Add(time.Second),
-		time.Now().Add(2 * time.Second),
 	}
 	got, _ := beaconingScore(ts)
 	if got != 0 {
-		t.Errorf("expected 0 score with only 3 timestamps, got %.2f", got)
+		t.Errorf("expected 0 score with only 2 timestamps, got %.2f", got)
 	}
 }
 
@@ -151,5 +150,54 @@ func TestScore_SuspiciousCmdline(t *testing.T) {
 	}
 	if s < 2.0 {
 		t.Errorf("expected score ≥ 2.0 for suspicious cmdline, got %.2f", s)
+	}
+}
+
+func TestScore_CmdlineRegexWhitespaceVariant(t *testing.T) {
+	// Regex must catch "base64  -d" (extra space) — missed by old exact-string matching.
+	key := FlowKey{SrcIP: "10.0.0.3", DstIP: "5.6.7.8", DstPort: 443, Proto: "TCP"}
+	rec := makeRec(withRDNS("cdn.host"), withCmdline("base64  -d < /tmp/payload | bash"))
+	_, reasons := score(key, rec, nil)
+	found := false
+	for _, r := range reasons {
+		if strings.Contains(r, "cmdline") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("regex should catch 'base64  -d' (extra whitespace), got %v", reasons)
+	}
+}
+
+func withDstIP(ip string) func(*FlowRecord) { return func(r *FlowRecord) { r.DstIP = ip } }
+
+func TestScore_PrivateIPNoDNSPenalty(t *testing.T) {
+	// RFC 1918 destinations must NOT receive the DNS penalty — they never have PTR records.
+	for _, dstIP := range []string{"10.0.0.1", "192.168.1.1", "172.16.0.1", "127.0.0.1"} {
+		key := FlowKey{SrcIP: "10.0.0.2", DstIP: dstIP, DstPort: 8080, Proto: "TCP"}
+		rec := makeRec(withDstIP(dstIP)) // DstIP must match key so isPrivateIP is evaluated correctly
+		_, reasons := score(key, rec, nil)
+		for _, r := range reasons {
+			if strings.Contains(r, "reverse DNS") {
+				t.Errorf("private IP %s should not receive DNS penalty, got reason: %q", dstIP, r)
+			}
+		}
+	}
+}
+
+func TestScore_PublicIPGetsDNSPenalty(t *testing.T) {
+	// A public IP with no PTR record should still score the DNS penalty.
+	// Port 80 avoids port-score noise; DstIP must be set on rec for isPrivateIP to evaluate.
+	key := FlowKey{SrcIP: "10.0.0.1", DstIP: "203.0.113.1", DstPort: 80, Proto: "TCP"}
+	rec := makeRec(withDstIP("203.0.113.1"), withRDNS("")) // explicit empty RDNS
+	_, reasons := score(key, rec, nil)
+	found := false
+	for _, r := range reasons {
+		if strings.Contains(r, "reverse DNS") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("public IP with no PTR should get DNS penalty, reasons: %v", reasons)
 	}
 }

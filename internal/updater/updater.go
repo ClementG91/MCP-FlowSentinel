@@ -16,7 +16,7 @@ import (
 )
 
 const (
-	repo    = "ClementG91/MCP-flowsentinel"
+	repo    = "ClementG91/MCP-FlowSentinel"
 	apiBase = "https://api.github.com"
 	timeout = 30 * time.Second
 )
@@ -104,6 +104,9 @@ func latestRelease(ctx context.Context) (*Release, error) {
 	}
 	req.Header.Set("User-Agent", "mcp-flowsentinel-updater")
 	req.Header.Set("Accept", "application/vnd.github+json")
+	if tok := os.Getenv("GITHUB_TOKEN"); tok != "" {
+		req.Header.Set("Authorization", "Bearer "+tok)
+	}
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {

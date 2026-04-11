@@ -11,6 +11,7 @@ import (
 	"github.com/ClementG91/MCP-FlowSentinel/internal/aggregate"
 	"github.com/ClementG91/MCP-FlowSentinel/internal/capture"
 	"github.com/ClementG91/MCP-FlowSentinel/internal/correlate"
+	"github.com/ClementG91/MCP-FlowSentinel/internal/history"
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
 )
@@ -127,12 +128,15 @@ func analyzeNetworkHandler(ctx context.Context, req mcp.CallToolRequest) (*mcp.C
 			Proto:      pkt.Proto,
 			PayloadLen: pkt.PayloadLen,
 			Timestamp:  pkt.Timestamp,
+			DNSQuery:   pkt.DNSQuery,
+			TLSSNIName: pkt.TLSSNIName,
 		})
 		totalPackets++
 	}
 
 	// ── Score, filter, summarise ─────────────────────────────────────────────
 	allFlows := agg.Finalize(resolver)
+	history.Append("live:"+ifaceName, allFlows)
 	summary := aggregate.Summarise(allFlows) // summary over ALL flows before filtering
 	flows := aggregate.FilterOptions{MinScore: minScore, TopN: topN}.Apply(allFlows)
 

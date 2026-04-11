@@ -62,10 +62,16 @@ internal/
   correlate/  Socket → process mapping (gopsutil)
   aggregate/  Flow aggregation, beaconing detection, scoring engine
   updater/    Self-update from GitHub Releases
-  tools/      MCP tool handlers (these are what Claude calls)
+  tools/      MCP tool handlers (these are what the AI client calls)
 ```
 
 If you want to add a new MCP tool, look at `internal/tools/list_interfaces.go` as the simplest example, then register it in `internal/tools/register.go`.
+
+---
+
+## MCP client compatibility
+
+This server uses the **stdio transport** and is compatible with any MCP client — not just Claude Desktop. When writing or testing tools, ensure they work generically: avoid Claude-specific assumptions in tool descriptions or output format. See [README.md](README.md) for the full list of supported clients.
 
 ---
 
@@ -94,13 +100,19 @@ Looking for something to work on? Here are some ideas:
 
 | Area | Idea |
 |------|------|
-| **Scoring** | Add GeoIP scoring (flag connections to high-risk countries) |
-| **Scoring** | DNS-over-HTTPS / DNS tunneling detection |
+| **Scoring** | GeoIP scoring — flag connections to high-risk countries (MaxMind GeoLite2) |
+| **Scoring** | DNS tunneling / exfiltration detection (high-entropy subdomains) |
+| **Scoring** | TLS fingerprinting — extract SNI and JA3 hash from ClientHello |
+| **Scoring** | Process ancestry chain — suspicious parent→child spawning patterns |
+| **Tools** | `get_flow_history` — query a rolling 24 h flow database |
+| **Tools** | `analyze_process` — deep dive on a single PID's network activity |
+| **Tools** | `alert_on_score` — watch and notify when a flow exceeds a threshold |
 | **Output** | CSV / NDJSON export format |
-| **Tools** | `alert_on_score` tool: watch and notify when a flow exceeds a threshold |
+| **Output** | `clean_signals` field explaining why a flow scored 0 |
 | **Tests** | Unit tests for MCP tool handlers (mock MCP context) |
 | **Tests** | Capture tests using pre-recorded pcap fixtures |
 | **Docs** | Video walkthrough / demo GIF for README |
+| **Clients** | Config snippets for additional MCP clients |
 | **Platform** | Windows ARM64 native binary support |
 
 ---
@@ -110,7 +122,7 @@ Looking for something to work on? Here are some ideas:
 ```
 feat: add GeoIP scoring heuristic
 fix: handle empty process cmdline on macOS
-docs: add Npcap troubleshooting section
+docs: add Cursor MCP configuration snippet
 test: add beaconing edge case for single-packet flows
 ```
 

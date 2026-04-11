@@ -13,6 +13,7 @@ import (
 	"github.com/ClementG91/MCP-FlowSentinel/internal/aggregate"
 	"github.com/ClementG91/MCP-FlowSentinel/internal/capture"
 	"github.com/ClementG91/MCP-FlowSentinel/internal/correlate"
+	"github.com/ClementG91/MCP-FlowSentinel/internal/history"
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
 )
@@ -66,9 +67,14 @@ func analyzePcapHandler(ctx context.Context, req mcp.CallToolRequest) (*mcp.Call
 		return errorResult("file_path must have a .pcap or .pcapng extension"), nil
 	}
 
-	// Verify the file exists and is readable before opening pcap.
-	if _, err := os.Stat(filePath); err != nil {
+	// Verify the file exists, is readable, and is not unreasonably large.
+	fi, err := os.Stat(filePath)
+	if err != nil {
 		return errorResult(fmt.Sprintf("file not accessible: %v", err)), nil
+	}
+	const maxPcapSize = 1 << 30 // 1 GB
+	if fi.Size() > maxPcapSize {
+		return errorResult(fmt.Sprintf("pcap file too large (%.1f GB); maximum allowed is 1 GB", float64(fi.Size())/(1<<30))), nil
 	}
 
 	bpfFilter, _ := args["bpf_filter"].(string)
@@ -105,11 +111,14 @@ func analyzePcapHandler(ctx context.Context, req mcp.CallToolRequest) (*mcp.Call
 			Proto:      pkt.Proto,
 			PayloadLen: pkt.PayloadLen,
 			Timestamp:  pkt.Timestamp,
+			DNSQuery:   pkt.DNSQuery,
+			TLSSNIName: pkt.TLSSNIName,
 		})
 		totalPackets++
 	}
 
 	allFlows := agg.Finalize(resolver)
+	history.Append("pcap:"+filePath, allFlows)
 	summary := aggregate.Summarise(allFlows)
 	flows := aggregate.FilterOptions{MinScore: minScore, TopN: topN}.Apply(allFlows)
 

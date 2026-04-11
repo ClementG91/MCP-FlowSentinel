@@ -9,4 +9,6 @@ func Register(s *server.MCPServer) {
 	registerAnalyzeNetwork(s)
 	registerAnalyzePcap(s)
 	registerGetProcessMap(s)
+	registerGetFlowHistory(s)
+	registerAnalyzeProcess(s)
 }

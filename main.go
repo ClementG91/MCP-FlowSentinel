@@ -12,10 +12,10 @@ import (
 	"time"
 
 	"github.com/ClementG91/MCP-FlowSentinel/internal/capture"
+	"github.com/ClementG91/MCP-FlowSentinel/internal/intel"
+	"github.com/ClementG91/MCP-FlowSentinel/internal/tools"
 	"github.com/ClementG91/MCP-FlowSentinel/internal/updater"
 	"github.com/mark3labs/mcp-go/server"
-
-	"github.com/ClementG91/MCP-FlowSentinel/internal/tools"
 )
 
 // version is injected at build time via -ldflags "-X main.version=<tag>".
@@ -49,6 +49,8 @@ func main() {
 			os.Exit(1)
 		}
 	}
+
+	intel.Init() // load GeoIP databases if GEOIP_CITY_DB / GEOIP_ASN_DB are set
 
 	s := server.NewMCPServer("MCP-FlowSentinel", version)
 	tools.Register(s)
