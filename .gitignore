@@ -1,0 +1,5 @@
+mcp-flowsentinel
+mcp-flowsentinel.exe
+*.exe~
+.claude/
+mcp-flowsentinel.exe.old

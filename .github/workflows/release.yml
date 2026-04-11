@@ -1,0 +1,179 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  # ── Linux amd64 + Windows (cross-compile from Linux) ────────────────────────
+  build-linux-windows:
+    name: Build Linux amd64 + Windows
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+          cache: true
+
+      - name: Install build deps
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y libpcap-dev mingw-w64 zip
+
+      - name: Download Npcap SDK (for Windows cross-compile)
+        run: |
+          curl -sL https://npcap.com/dist/npcap-sdk-1.13.zip -o npcap-sdk.zip
+          unzip -q npcap-sdk.zip -d npcap-sdk
+
+      - name: Get version
+        id: version
+        run: echo "VERSION=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+
+      - name: Build linux/amd64
+        run: |
+          CGO_ENABLED=1 GOOS=linux GOARCH=amd64 \
+            go build -trimpath \
+            -ldflags "-s -w -X main.version=${{ steps.version.outputs.VERSION }}" \
+            -o dist/mcp-flowsentinel-linux-amd64 .
+
+      - name: Build windows/amd64
+        env:
+          CGO_CFLAGS: "-I${{ github.workspace }}/npcap-sdk/Include"
+          CGO_LDFLAGS: "-L${{ github.workspace }}/npcap-sdk/Lib/x64 -lws2_32"
+        run: |
+          CGO_ENABLED=1 GOOS=windows GOARCH=amd64 CC=x86_64-w64-mingw32-gcc \
+            go build -trimpath \
+            -ldflags "-s -w -X main.version=${{ steps.version.outputs.VERSION }}" \
+            -o dist/mcp-flowsentinel-windows-amd64.exe .
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: binaries-linux-windows
+          path: dist/
+
+  # ── Linux arm64 (native runner — no cross-compilation needed) ────────────────
+  build-linux-arm64:
+    name: Build Linux ARM64
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+          cache: true
+
+      - name: Install libpcap
+        run: sudo apt-get update -qq && sudo apt-get install -y libpcap-dev
+
+      - name: Get version
+        id: version
+        run: echo "VERSION=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+
+      - name: Build linux/arm64
+        run: |
+          CGO_ENABLED=1 GOOS=linux GOARCH=arm64 \
+            go build -trimpath \
+            -ldflags "-s -w -X main.version=${{ steps.version.outputs.VERSION }}" \
+            -o dist/mcp-flowsentinel-linux-arm64 .
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: binaries-linux-arm64
+          path: dist/
+
+  # ── macOS (native, needs Xcode linker for CGO) ──────────────────────────────
+  build-macos:
+    name: Build macOS
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+          cache: true
+
+      - name: Install libpcap
+        run: brew install libpcap
+
+      - name: Get version
+        id: version
+        run: echo "VERSION=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+
+      - name: Build darwin/amd64
+        run: |
+          CGO_ENABLED=1 GOOS=darwin GOARCH=amd64 \
+            go build -trimpath \
+            -ldflags "-s -w -X main.version=${{ steps.version.outputs.VERSION }}" \
+            -o dist/mcp-flowsentinel-darwin-amd64 .
+
+      - name: Build darwin/arm64
+        run: |
+          CGO_ENABLED=1 GOOS=darwin GOARCH=arm64 \
+            go build -trimpath \
+            -ldflags "-s -w -X main.version=${{ steps.version.outputs.VERSION }}" \
+            -o dist/mcp-flowsentinel-darwin-arm64 .
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: binaries-macos
+          path: dist/
+
+  # ── Create GitHub Release with all binaries ──────────────────────────────────
+  release:
+    name: Create Release
+    needs: [build-linux-windows, build-linux-arm64, build-macos]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist/
+          merge-multiple: true
+
+      - name: Generate checksums
+        working-directory: dist
+        run: sha256sum * > SHA256SUMS.txt
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
+          body: |
+            ## Install
+
+            ### Windows (no Go required)
+            ```powershell
+            irm https://raw.githubusercontent.com/ClementG91/MCP-FlowSentinel/main/install.ps1 | iex
+            ```
+            > Requires [Npcap](https://npcap.com/#download) — install it first (free, 2 min).
+
+            ### Linux
+            ```bash
+            curl -fsSL https://raw.githubusercontent.com/ClementG91/MCP-FlowSentinel/main/install.sh | bash
+            ```
+
+            ### macOS
+            ```bash
+            curl -fsSL https://raw.githubusercontent.com/ClementG91/MCP-FlowSentinel/main/install.sh | bash
+            ```
+
+            ## Upgrade
+            ```
+            mcp-flowsentinel --update
+            ```
+
+            See [README](https://github.com/ClementG91/MCP-FlowSentinel#readme) for full documentation.
