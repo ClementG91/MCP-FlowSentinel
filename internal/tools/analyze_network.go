@@ -10,6 +10,7 @@ import (
 
 	"github.com/ClementG91/MCP-FlowSentinel/internal/aggregate"
 	"github.com/ClementG91/MCP-FlowSentinel/internal/capture"
+	"github.com/ClementG91/MCP-FlowSentinel/internal/config"
 	"github.com/ClementG91/MCP-FlowSentinel/internal/correlate"
 	"github.com/ClementG91/MCP-FlowSentinel/internal/history"
 	"github.com/mark3labs/mcp-go/mcp"
@@ -69,12 +70,14 @@ func analyzeNetworkHandler(ctx context.Context, req mcp.CallToolRequest) (*mcp.C
 		return errorResult("invalid interface name — use list_interfaces to find valid names"), nil
 	}
 
-	durationMS := 5000.0
+	capCfg := config.Get().Capture
+	durationMS := float64(capCfg.DefaultDurationSec * 1000)
 	if v, ok := args["duration_ms"].(float64); ok && v > 0 {
 		durationMS = v
 	}
-	if durationMS > 60000 {
-		durationMS = 60000
+	maxMS := float64(capCfg.MaxDurationSec * 1000)
+	if durationMS > maxMS {
+		durationMS = maxMS
 	}
 
 	bpfFilter, _ := args["bpf_filter"].(string)
@@ -130,6 +133,7 @@ func analyzeNetworkHandler(ctx context.Context, req mcp.CallToolRequest) (*mcp.C
 			Timestamp:  pkt.Timestamp,
 			DNSQuery:   pkt.DNSQuery,
 			TLSSNIName: pkt.TLSSNIName,
+			JA3Hash:    pkt.JA3Hash,
 		})
 		totalPackets++
 	}

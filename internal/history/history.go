@@ -15,13 +15,10 @@ import (
 	"time"
 
 	"github.com/ClementG91/MCP-FlowSentinel/internal/aggregate"
+	"github.com/ClementG91/MCP-FlowSentinel/internal/config"
 )
 
-const (
-	maxAge     = 24 * time.Hour
-	maxFileSize = 50 * 1024 * 1024 // 50 MB — prune more aggressively above this
-	pruneEvery  = 5                 // run pruneOld after every N appends
-)
+const pruneEvery = 5 // run pruneOld after every N appends
 
 // Entry is one history record: a batch of flows from a single capture session.
 type Entry struct {
@@ -99,7 +96,7 @@ func Append(source string, flows []aggregate.FlowRecord) {
 // Query reads the history file and returns entries that match opts.
 func Query(opts QueryOpts) ([]Entry, error) {
 	if opts.MaxAge <= 0 {
-		opts.MaxAge = maxAge
+		opts.MaxAge = time.Duration(config.Get().History.MaxAgeHours) * time.Hour
 	}
 	cutoff := time.Now().Add(-opts.MaxAge)
 
@@ -193,9 +190,10 @@ func pruneOld() {
 		return
 	}
 
-	age := maxAge
-	if fi.Size() > maxFileSize {
-		age = 12 * time.Hour
+	hcfg := config.Get().History
+	age := time.Duration(hcfg.MaxAgeHours) * time.Hour
+	if fi.Size() > int64(hcfg.MaxSizeMB)*1024*1024 {
+		age = time.Duration(hcfg.PruneToHours) * time.Hour
 	}
 	cutoff := time.Now().Add(-age)
 

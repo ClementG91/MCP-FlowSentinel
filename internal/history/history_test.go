@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/ClementG91/MCP-FlowSentinel/internal/aggregate"
+	"github.com/ClementG91/MCP-FlowSentinel/internal/config"
 )
 
 // ─── test helpers ─────────────────────────────────────────────────────────────
@@ -308,6 +309,11 @@ func TestAppend_Concurrent_NoDataRace(t *testing.T) {
 	}
 	wg.Wait()
 
+	// On Windows, pruneOld runs in a background goroutine (go pruneOld()) and
+	// may still hold the history file open when the test's TempDir cleanup runs.
+	// A short sleep lets any in-flight prune goroutines finish before cleanup.
+	time.Sleep(200 * time.Millisecond)
+
 	entries, err := Query(QueryOpts{})
 	if err != nil {
 		t.Fatalf("Query after concurrent appends: %v", err)
@@ -433,9 +439,10 @@ func TestPruneOld_LargeFile_Uses12hWindow(t *testing.T) {
 		Flows:     []aggregate.FlowRecord{makeFlow("1.1.1.1", "2.2.2.2", "p", 0)},
 	})
 
-	// Make the file appear > maxFileSize (50 MB) via truncation (sparse file).
+	// Make the file appear > configured max size (default 50 MB) via sparse file.
+	maxFileSizeBytes := int64(config.Get().History.MaxSizeMB) * 1024 * 1024
 	mu.Lock()
-	if err := os.Truncate(histPath, maxFileSize+1); err != nil {
+	if err := os.Truncate(histPath, maxFileSizeBytes+1); err != nil {
 		mu.Unlock()
 		t.Skipf("cannot create sparse file on this OS: %v", err)
 	}

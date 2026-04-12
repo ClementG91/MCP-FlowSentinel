@@ -15,7 +15,8 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/oschwald/geoip2-golang"
+	"github.com/ClementG91/MCP-FlowSentinel/internal/config"
+	geoip2 "github.com/oschwald/geoip2-golang"
 )
 
 // GeoInfo holds threat-intelligence resolved for a single IP address.
@@ -35,18 +36,30 @@ var (
 	ipCache  sync.Map // string IP → *GeoInfo (nil = not found / no DB)
 )
 
-// Init loads MaxMind databases from GEOIP_CITY_DB and GEOIP_ASN_DB env vars.
-// Call once at process start. Errors are silently ignored — the package
-// degrades to a no-op when databases are missing or invalid.
+// Init loads MaxMind databases from the active config. Environment variables
+// GEOIP_CITY_DB and GEOIP_ASN_DB always take precedence over config-file
+// values. Call once at startup; errors are silently ignored (no-op without DBs).
 func Init() {
 	initOnce.Do(func() {
-		if p := os.Getenv("GEOIP_CITY_DB"); p != "" {
-			if r, err := geoip2.Open(p); err == nil {
+		cfg := config.Get().GeoIP
+
+		// Env vars are the highest priority — they override whatever is in config.
+		cityPath := cfg.CityDB
+		if v := os.Getenv("GEOIP_CITY_DB"); v != "" {
+			cityPath = v
+		}
+		asnPath := cfg.ASNDB
+		if v := os.Getenv("GEOIP_ASN_DB"); v != "" {
+			asnPath = v
+		}
+
+		if cityPath != "" {
+			if r, err := geoip2.Open(cityPath); err == nil {
 				cityDB = r
 			}
 		}
-		if p := os.Getenv("GEOIP_ASN_DB"); p != "" {
-			if r, err := geoip2.Open(p); err == nil {
+		if asnPath != "" {
+			if r, err := geoip2.Open(asnPath); err == nil {
 				asnDB = r
 			}
 		}
@@ -111,8 +124,9 @@ func Lookup(ipStr string) *GeoInfo {
 			found = true
 
 			orgLower := strings.ToLower(info.OrgName)
-			for _, pat := range highRiskASNPatterns {
-				if strings.Contains(orgLower, pat) {
+			allPatterns := append(highRiskASNPatterns, config.Get().Scoring.ExtraHighRiskASNs...)
+			for _, pat := range allPatterns {
+				if strings.Contains(orgLower, strings.ToLower(pat)) {
 					info.IsHighRisk = true
 					info.RiskReason = fmt.Sprintf("ASN with documented abuse history: %s (AS%d)", info.OrgName, info.ASN)
 					break

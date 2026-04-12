@@ -12,6 +12,8 @@ import (
 	"time"
 
 	"github.com/ClementG91/MCP-FlowSentinel/internal/capture"
+	"github.com/ClementG91/MCP-FlowSentinel/internal/config"
+	"github.com/ClementG91/MCP-FlowSentinel/internal/daemon"
 	"github.com/ClementG91/MCP-FlowSentinel/internal/intel"
 	"github.com/ClementG91/MCP-FlowSentinel/internal/tools"
 	"github.com/ClementG91/MCP-FlowSentinel/internal/updater"
@@ -26,8 +28,25 @@ func main() {
 	log.SetOutput(os.Stderr)
 	log.SetFlags(log.LstdFlags | log.Lshortfile)
 
-	if len(os.Args) > 1 {
-		switch os.Args[1] {
+	// Parse --config before the switch so all flags can use the loaded config.
+	configPath := ""
+	filteredArgs := os.Args[1:]
+	for i := 0; i < len(filteredArgs); i++ {
+		if filteredArgs[i] == "--config" && i+1 < len(filteredArgs) {
+			configPath = filteredArgs[i+1]
+			filteredArgs = append(filteredArgs[:i], filteredArgs[i+2:]...)
+			break
+		}
+	}
+
+	// Load config early so all subsystems share the same values.
+	if _, err := config.Load(configPath); err != nil {
+		fmt.Fprintf(os.Stderr, "config error: %v\n", err)
+		os.Exit(1)
+	}
+
+	if len(filteredArgs) > 0 {
+		switch filteredArgs[0] {
 		case "--version", "-v":
 			fmt.Printf("mcp-flowsentinel %s\n", version)
 			return
@@ -40,17 +59,37 @@ func main() {
 				os.Exit(1)
 			}
 			return
+		case "--init-config":
+			path := config.DefaultPath()
+			if len(filteredArgs) > 1 {
+				path = filteredArgs[1]
+			}
+			if err := config.WriteDefault(path); err != nil {
+				fmt.Fprintf(os.Stderr, "init-config error: %v\n", err)
+				os.Exit(1)
+			}
+			fmt.Printf("Config written to: %s\n", path)
+			fmt.Println("Edit it then restart the server (or run with --config <path>).")
+			return
+		case "--daemon":
+			runDaemon()
+			return
 		default:
-			fmt.Fprintf(os.Stderr, "Usage: %s [--version | --check | --update]\n", os.Args[0])
-			fmt.Fprintf(os.Stderr, "  (no flags) — start MCP server on stdio\n")
-			fmt.Fprintf(os.Stderr, "  --check    — verify pcap access and list interfaces\n")
-			fmt.Fprintf(os.Stderr, "  --update   — update to the latest release\n")
-			fmt.Fprintf(os.Stderr, "  --version  — print version and exit\n")
+			fmt.Fprintf(os.Stderr, "Usage: %s [options] [command]\n\n", os.Args[0])
+			fmt.Fprintf(os.Stderr, "Commands:\n")
+			fmt.Fprintf(os.Stderr, "  (none)            Start MCP server on stdio\n")
+			fmt.Fprintf(os.Stderr, "  --daemon          Run continuous background monitoring + MCP server\n")
+			fmt.Fprintf(os.Stderr, "  --check           Verify pcap access and list interfaces\n")
+			fmt.Fprintf(os.Stderr, "  --init-config     Write a default config.yaml and exit\n")
+			fmt.Fprintf(os.Stderr, "  --update          Update to the latest release\n")
+			fmt.Fprintf(os.Stderr, "  --version         Print version and exit\n\n")
+			fmt.Fprintf(os.Stderr, "Options:\n")
+			fmt.Fprintf(os.Stderr, "  --config <path>   Load config from path (default: %s)\n", config.DefaultPath())
 			os.Exit(1)
 		}
 	}
 
-	intel.Init() // load GeoIP databases if GEOIP_CITY_DB / GEOIP_ASN_DB are set
+	intel.Init() // load GeoIP databases (paths come from config or env vars)
 
 	s := server.NewMCPServer("MCP-FlowSentinel", version)
 	tools.Register(s)
@@ -59,6 +98,32 @@ func main() {
 	defer cancel()
 
 	log.Printf("MCP-FlowSentinel %s — stdio transport ready", version)
+
+	if err := server.NewStdioServer(s).Listen(ctx, os.Stdin, os.Stdout); err != nil {
+		log.Fatalf("fatal: %v", err)
+	}
+}
+
+// runDaemon starts the continuous monitoring loop alongside the MCP server.
+// The daemon captures rolling windows in the background while the MCP server
+// remains available on stdio for on-demand queries.
+func runDaemon() {
+	intel.Init()
+
+	s := server.NewMCPServer("MCP-FlowSentinel", version)
+	tools.Register(s)
+
+	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer cancel()
+
+	// Run daemon capture loop in background goroutine.
+	go func() {
+		if err := daemon.Run(ctx); err != nil {
+			log.Printf("daemon stopped: %v", err)
+		}
+	}()
+
+	log.Printf("MCP-FlowSentinel %s — daemon mode + stdio transport ready", version)
 
 	if err := server.NewStdioServer(s).Listen(ctx, os.Stdin, os.Stdout); err != nil {
 		log.Fatalf("fatal: %v", err)

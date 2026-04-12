@@ -24,4 +24,5 @@ require (
 	github.com/yusufpapurcu/wmi v1.2.4 // indirect
 	go4.org/netipx v0.0.0-20231129151722-fdeea329fbba // indirect
 	golang.org/x/sys v0.38.0 // indirect
+	gopkg.in/yaml.v3 v3.0.1 // indirect
 )

@@ -7,6 +7,7 @@ import (
 	"net"
 	"time"
 
+	"github.com/ClementG91/MCP-FlowSentinel/internal/ja3"
 	"github.com/google/gopacket"
 	"github.com/google/gopacket/layers"
 	"github.com/google/gopacket/pcap"
@@ -24,6 +25,7 @@ type PacketEvent struct {
 	// Optional enrichment — empty string means not present.
 	DNSQuery   string // first question name from a DNS/UDP-53 packet
 	TLSSNIName string // server name from TLS ClientHello
+	JA3Hash    string // JA3 fingerprint of TLS ClientHello, "" if not TLS
 }
 
 // CapturePackets opens a live pcap handle on iface, applies an optional BPF
@@ -162,9 +164,10 @@ func parsePacket(pkt gopacket.Packet) *PacketEvent {
 		event.DNSQuery = extractDNSQuery(pkt)
 	}
 
-	// TLS SNI extraction — TCP port 443 (or any other HTTPS-like port).
+	// TLS enrichment — SNI + JA3 fingerprint from ClientHello.
 	if proto == "TCP" && len(tcpPayload) > 0 {
 		event.TLSSNIName = extractTLSSNI(tcpPayload)
+		event.JA3Hash = ja3.Fingerprint(tcpPayload)
 	}
 
 	return event

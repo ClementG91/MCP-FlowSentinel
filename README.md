@@ -239,6 +239,7 @@ Each flow is scored 0–10 based on multiple signals:
 | Signal | Points | Rationale |
 |--------|--------|-----------|
 | Known-bad port (4444, 1337, 31337, 6666 …) | +4.0 | Metasploit, back-connect shells, botnets |
+| **JA3 TLS fingerprint matches known malware** | **+4.0** | **Cobalt Strike, Meterpreter, Empire, Sliver, Dridex, TrickBot, Emotet …** |
 | Non-standard port (< 49152, not in allowlist) | +1.0 | Uncommon ports deserve attention |
 | No reverse DNS on public IP | +0.8 | Direct IP connections bypass hostname filtering |
 | High-entropy DNS subdomain (entropy > 3.5 or label > 40 chars) | +2.5 | DNS exfiltration / C2 over DNS |
@@ -267,12 +268,42 @@ Low-scoring flows include a `clean_signals` array explaining why they look benig
 
 ---
 
+## JA3 TLS fingerprinting
+
+Every TLS `ClientHello` is fingerprinted using the [JA3 algorithm](https://github.com/salesforce/ja3) (MD5 of TLS version, cipher suites, extensions, elliptic curves, and EC point formats — with GREASE values filtered). The `ja3_hash` field is always included in flow records for TLS connections.
+
+If the hash matches the built-in table of documented malware fingerprints, the flow gets **+4.0 points** and the `ja3_known_bad` field names the matching family. Current coverage:
+
+| Family | Description |
+|--------|-------------|
+| Cobalt Strike (default profile) | Post-exploitation C2 framework |
+| Metasploit Meterpreter | Reverse HTTPS stager |
+| Empire C2 | PowerShell C2 framework |
+| Sliver C2 | Open-source implant framework |
+| Havoc C2 / BruteRatel C4 | Modern offensive frameworks |
+| Dridex / TrickBot / Emotet | Banking trojans / loaders |
+| AsyncRAT / njRAT / Raccoon / Redline | RATs and stealers |
+
+The fingerprint is derived purely from the TLS handshake — it does not require decryption and works on any HTTPS traffic, not just port 443.
+
+---
+
 ## GeoIP enrichment (optional)
 
 Flows can be enriched with country code, ASN organisation, and high-risk ASN detection using the free [MaxMind GeoLite2](https://dev.maxmind.com/geoip/geolite2-free-geolocation-data) databases.
 
 1. Sign up for a free MaxMind account and download `GeoLite2-City.mmdb` and `GeoLite2-ASN.mmdb`.
-2. Set the environment variables before starting your AI client:
+2. Configure the paths (either method works):
+
+**Option A — config file** (persistent, survives restarts):
+
+```yaml
+geoip:
+  city_db: "/path/to/GeoLite2-City.mmdb"
+  asn_db:  "/path/to/GeoLite2-ASN.mmdb"
+```
+
+**Option B — environment variables** (always override config file):
 
 ```bash
 export GEOIP_CITY_DB=/path/to/GeoLite2-City.mmdb
@@ -285,13 +316,142 @@ $env:GEOIP_CITY_DB = "C:\path\to\GeoLite2-City.mmdb"
 $env:GEOIP_ASN_DB  = "C:\path\to\GeoLite2-ASN.mmdb"
 ```
 
-When enabled, each flow response includes `country`, `asn_org`, and `geo_high_risk` fields. The `analyze_process` tool includes per-connection GeoIP data. Without these env vars the feature is silently disabled — the tool works fine without it.
+When enabled, each flow response includes `country`, `asn_org`, and `geo_high_risk` fields. The `analyze_process` tool includes per-connection GeoIP data. Without either option the feature is silently disabled — the tool works fine without it.
+
+---
+
+## Configuration
+
+All thresholds, limits, and optional features can be tuned via a YAML config file.
+
+### Generate a config file
+
+```bash
+mcp-flowsentinel --init-config
+```
+
+This writes a fully commented `~/.config/mcp-flowsentinel/config.yaml` with every option documented inline. Edit what you need — unset keys fall back to built-in defaults.
+
+Custom config path:
+
+```bash
+mcp-flowsentinel --init-config /path/to/my/config.yaml
+mcp-flowsentinel --config /path/to/my/config.yaml
+```
+
+Or via environment variable (always takes precedence over `--config`):
+
+```bash
+FLOWSENTINEL_CONFIG=/path/to/my/config.yaml mcp-flowsentinel
+```
+
+### Key config sections
+
+```yaml
+# ─── Detection Engine ────────────────────────────────────────────────────
+scoring:
+  beaconing_strong_cv: 0.15       # CV < this → strong beaconing (+3.5)
+  beaconing_possible_cv: 0.30     # CV < this → possible beaconing (+2.0)
+  beaconing_min_packets: 5        # Minimum packets required
+  dns_entropy_threshold: 3.5      # Shannon entropy above this → suspicious
+  scan_confirmed_destinations: 20 # >= N unique dsts → confirmed port scan
+  # Add ports/paths/patterns to the built-in detection lists:
+  extra_bad_ports: [8888, 9999]
+  extra_standard_ports: [3000, 5000, 8000] # suppress false positives for dev services
+  extra_suspicious_paths:
+    - "/opt/implants/"
+  extra_cmdline_patterns:
+    - "(?i)mshta\\.exe"
+  extra_high_risk_asns:
+    - "my-bad-hoster"
+  # Kill-switches for noisy signals (set true to disable):
+  disable_binary_path_scoring: false  # useful in containers/build systems
+  disable_port_scoring: false         # useful if your app uses non-standard ports
+
+# ─── Capture Timing ──────────────────────────────────────────────────────
+capture:
+  default_duration_seconds: 5
+  max_duration_seconds: 60
+  dns_timeout_ms: 200
+  dns_workers: 20
+
+# ─── GeoIP (paths can also be set via GEOIP_CITY_DB / GEOIP_ASN_DB env vars) ─
+geoip:
+  city_db: "/path/to/GeoLite2-City.mmdb"
+  asn_db:  "/path/to/GeoLite2-ASN.mmdb"
+
+# ─── Webhook Alerting ────────────────────────────────────────────────────
+alerting:
+  enabled: true
+  webhook_url: "https://hooks.slack.com/services/T.../B.../..."  # or Discord/generic HTTP
+  min_score_threshold: 7.0  # only alert on CRITICAL flows
+
+# ─── Daemon Mode ─────────────────────────────────────────────────────────
+daemon:
+  interface: ""                    # auto-select if empty
+  bpf_filter: "not port 22"        # optional BPF filter
+  capture_interval_seconds: 300    # rolling capture window
+```
+
+### Environment variable priority
+
+Environment variables always override config file values:
+
+| Variable | Overrides |
+|----------|-----------|
+| `FLOWSENTINEL_CONFIG` | Config file path |
+| `GEOIP_CITY_DB` | `geoip.city_db` |
+| `GEOIP_ASN_DB` | `geoip.asn_db` |
+| `FLOWSENTINEL_WEBHOOK_URL` | `alerting.webhook_url` |
+
+---
+
+## Daemon mode — continuous monitoring
+
+Run the MCP server and a background capture loop at the same time:
+
+```bash
+mcp-flowsentinel --daemon
+```
+
+The daemon captures rolling windows (default: 5 minutes) continuously, feeding results into the flow history. Your AI can then query that accumulated history at any time:
+
+```
+"Show me everything suspicious from the last 30 minutes."
+"Did anything beacon while I was away?"
+```
+
+Configure the interface and interval in `config.yaml` (`daemon.interface`, `daemon.capture_interval_seconds`), or let the daemon auto-select the first non-loopback interface.
+
+---
+
+## Webhook alerting
+
+When `alerting.enabled: true` and a `webhook_url` is set, MCP-FlowSentinel fires a JSON POST for every flow whose `suspicion_score` meets or exceeds `min_score_threshold` (default: 7.0 = CRITICAL).
+
+The request body:
+
+```json
+{
+  "source": "mcp-flowsentinel",
+  "timestamp": "2025-04-12T14:23:01Z",
+  "flow": { ... FlowRecord ... }
+}
+```
+
+Compatible with **Slack incoming webhooks**, **Discord webhooks**, and any generic HTTP endpoint.
+
+Set the URL via environment variable to keep it out of the config file:
+
+```bash
+FLOWSENTINEL_WEBHOOK_URL=https://hooks.slack.com/... mcp-flowsentinel --daemon
+```
 
 ---
 
 ## Flow history
 
-Every `analyze_network` and `analyze_pcap` session automatically appends results to a rolling 24-hour JSONL history at `~/.cache/mcp-flowsentinel/history.jsonl`. Ask your AI:
+Every `analyze_network`, `analyze_pcap`, and `--daemon` session automatically appends results to a rolling JSONL history at `~/.cache/mcp-flowsentinel/history.jsonl`. Ask your AI:
 
 ```
 "Show me all connections from the last 2 hours with a score above 5."
@@ -299,17 +459,29 @@ Every `analyze_network` and `analyze_pcap` session automatically appends results
 "Have I seen this IP before today?"
 ```
 
-The history file is capped at 50 MB. Older entries are pruned automatically.
+Default retention: 24 hours, 50 MB cap. Configurable via `config.yaml`:
+
+```yaml
+history:
+  max_age_hours: 24   # maximum entry age
+  max_size_mb: 50     # file size cap; triggers aggressive pruning when exceeded
+  prune_to_hours: 12  # keep last N hours when file is oversized
+```
 
 ---
 
-## Verify your install
+## CLI reference
 
-```
-mcp-flowsentinel --check
-```
-
-Confirms pcap access, lists your interfaces, and runs a 200 ms capture smoke test.
+| Command | Description |
+|---------|-------------|
+| `mcp-flowsentinel` | Start MCP server on stdio (normal use) |
+| `mcp-flowsentinel --daemon` | Continuous background monitoring + MCP server |
+| `mcp-flowsentinel --check` | Verify pcap access, list interfaces, run 200 ms smoke test |
+| `mcp-flowsentinel --init-config` | Write a default `config.yaml` to `~/.config/mcp-flowsentinel/config.yaml` |
+| `mcp-flowsentinel --init-config /path` | Write default config to a custom path |
+| `mcp-flowsentinel --config /path` | Load config from a specific path |
+| `mcp-flowsentinel --update` | Self-update to the latest GitHub release |
+| `mcp-flowsentinel --version` | Print version and exit |
 
 ---
 
@@ -344,17 +516,22 @@ chmod +x build-macos.sh && ./build-macos.sh
 ## Architecture
 
 ```
-main.go                          CLI: --version, --check, --update + MCP server bootstrap
+main.go                          CLI entry point + MCP server bootstrap
 internal/
-  capture/    capture.go         Live pcap capture + DNS/TLS SNI extraction
+  config/     config.go          YAML config + env var overrides (global singleton)
+  capture/    capture.go         Live pcap capture + DNS/TLS SNI + JA3 extraction
               interfaces.go      NIC enumeration (cross-platform)
               reader.go          Offline pcap reader (shared drain loop)
   correlate/  correlate.go       Maps socket 4-tuples to processes (gopsutil)
-  aggregate/  aggregate.go       Flow aggregation, scoring, beaconing, DNS exfil, clean signals
+  aggregate/  aggregate.go       Flow aggregation, scoring, beaconing, DNS exfil, JA3 matching
               filter.go          min_score / top_n filtering
   intel/      intel.go           GeoIP + threat-intel enrichment (MaxMind GeoLite2, cached)
-  history/    history.go         Rolling 24 h JSONL persistence (~/.cache/mcp-flowsentinel/)
+  ja3/        ja3.go             JA3 TLS fingerprinting + known-bad hash lookup
+  history/    history.go         Rolling JSONL persistence (~/.cache/mcp-flowsentinel/)
+  alerting/   alerting.go        Webhook notifications for high-score flows
+  daemon/     daemon.go          Continuous background capture loop
   updater/    updater.go         Self-update from GitHub Releases
+  cache/      lru.go             Generic bounded LRU cache (DNS, etc.)
   tools/      register.go        MCP tool registration
               analyze_network.go live capture tool
               analyze_pcap.go    offline analysis tool
@@ -371,15 +548,17 @@ Packet stream (libpcap)
   → capture.CapturePackets / OfflineReader
       ↳ DNS query extraction (UDP/TCP port 53)
       ↳ TLS SNI extraction (TCP ClientHello raw parse)
-  → aggregate.Aggregator.Add          (accumulate into flows, collect DNS/TLS sets)
+      ↳ JA3 fingerprint (TCP ClientHello — MD5 of TLS parameters)
+  → aggregate.Aggregator.Add          (accumulate into flows, collect DNS/TLS/JA3)
   → correlate.SocketTable.Lookup      (map flow → process)
   → aggregate.Finalize
       ↳ Pass 1: build base FlowRecords
-      ↳ Pass 2: parallel reverse-DNS (20 goroutines, 5 min TTL cache)
-      ↳ Pass 2.5: GeoIP enrichment (intel.Lookup, sync.Map cache)
+      ↳ Pass 2: parallel reverse-DNS (configurable workers, 5 min TTL LRU cache)
+      ↳ Pass 2.5: GeoIP + JA3 known-bad enrichment (sync.Map cache)
       ↳ Pass 3: per-flow scoring + clean signals
       ↳ Pass 4: cross-flow scan detection
   → history.Append                    (persist to rolling JSONL)
+  → alerting.Fire                     (webhook POST for CRITICAL flows, if configured)
   → aggregate.FilterOptions.Apply     (min_score / top_n)
   → FlowRecord JSON (sorted by SuspicionScore desc)
 ```

@@ -113,6 +113,7 @@ func analyzePcapHandler(ctx context.Context, req mcp.CallToolRequest) (*mcp.Call
 			Timestamp:  pkt.Timestamp,
 			DNSQuery:   pkt.DNSQuery,
 			TLSSNIName: pkt.TLSSNIName,
+			JA3Hash:    pkt.JA3Hash,
 		})
 		totalPackets++
 	}

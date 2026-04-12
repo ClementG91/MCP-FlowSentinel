@@ -14,11 +14,10 @@ import (
 	"time"
 
 	"github.com/ClementG91/MCP-FlowSentinel/internal/cache"
+	"github.com/ClementG91/MCP-FlowSentinel/internal/config"
 	"github.com/ClementG91/MCP-FlowSentinel/internal/intel"
+	"github.com/ClementG91/MCP-FlowSentinel/internal/ja3"
 )
-
-// dnsWorkers is the maximum number of concurrent reverse-DNS goroutines.
-const dnsWorkers = 20
 
 // dnsCacheTTL is how long a resolved (or negative) PTR result is reused.
 const dnsCacheTTL = 5 * time.Minute
@@ -110,6 +109,9 @@ type FlowRecord struct {
 	GeoHighRisk bool     `json:"geo_high_risk,omitempty"`
 	TLSSNIName  string   `json:"tls_sni,omitempty"`
 	DNSQueries  []string `json:"dns_queries,omitempty"`
+	// JA3 TLS fingerprinting
+	JA3Hash    string `json:"ja3_hash,omitempty"`    // MD5 of TLS ClientHello parameters
+	JA3KnownBad string `json:"ja3_known_bad,omitempty"` // malware family if hash matches known-bad list
 	// Analysis fields
 	SuspicionScore   float64  `json:"suspicion_score"`
 	RiskLevel        string   `json:"risk_level"`
@@ -132,6 +134,7 @@ type flowState struct {
 	timestamps  []time.Time
 	dnsQueries  map[string]struct{} // unique DNS query names observed for this flow
 	tlsNames    map[string]struct{} // unique TLS SNI names observed for this flow
+	ja3Hash     string              // first JA3 fingerprint observed for this flow
 }
 
 // Aggregator accumulates PacketEvents into flow states using a sync.Map
@@ -152,6 +155,7 @@ type PacketEvent struct {
 	Timestamp  time.Time
 	DNSQuery   string // first question name from a DNS packet (optional)
 	TLSSNIName string // server name from TLS ClientHello (optional)
+	JA3Hash    string // JA3 fingerprint of TLS ClientHello (optional)
 }
 
 // Add processes a single packet event.
@@ -189,6 +193,9 @@ func (a *Aggregator) Add(pkt PacketEvent) {
 			fs.tlsNames = make(map[string]struct{})
 		}
 		fs.tlsNames[pkt.TLSSNIName] = struct{}{}
+	}
+	if pkt.JA3Hash != "" && fs.ja3Hash == "" {
+		fs.ja3Hash = pkt.JA3Hash // keep only the first seen ClientHello per flow
 	}
 	fs.mu.Unlock()
 }
@@ -229,6 +236,7 @@ func (a *Aggregator) Finalize(resolver ProcessResolver) []FlowRecord {
 			sniName = sniSlice[0]
 		}
 
+		ja3h := fs.ja3Hash
 		rec := FlowRecord{
 			SrcIP:       key.SrcIP,
 			DstIP:       key.DstIP,
@@ -241,6 +249,7 @@ func (a *Aggregator) Finalize(resolver ProcessResolver) []FlowRecord {
 			LastSeen:    fs.lastSeen,
 			DNSQueries:  dnsSlice,
 			TLSSNIName:  sniName,
+			JA3Hash:     ja3h,
 		}
 		fs.mu.Unlock()
 
@@ -264,7 +273,7 @@ func (a *Aggregator) Finalize(resolver ProcessResolver) []FlowRecord {
 	})
 
 	// ── Pass 2: parallel reverse-DNS (semaphore-bounded) ─────────────────────
-	sem := make(chan struct{}, dnsWorkers)
+	sem := make(chan struct{}, config.Get().Capture.DNSWorkers)
 	var wg sync.WaitGroup
 	for i := range items {
 		wg.Add(1)
@@ -277,12 +286,17 @@ func (a *Aggregator) Finalize(resolver ProcessResolver) []FlowRecord {
 	}
 	wg.Wait()
 
-	// ── Pass 2.5: GeoIP enrichment (synchronous, cached) ─────────────────────
+	// ── Pass 2.5: GeoIP + JA3 known-bad enrichment (synchronous, cached) ───────
 	for i := range items {
 		if gi := intel.Lookup(items[i].rec.DstIP); gi != nil {
 			items[i].rec.Country = gi.CountryCode
 			items[i].rec.ASNOrg = gi.OrgName
 			items[i].rec.GeoHighRisk = gi.IsHighRisk
+		}
+		if items[i].rec.JA3Hash != "" {
+			if family, ok := ja3.Lookup(items[i].rec.JA3Hash); ok {
+				items[i].rec.JA3KnownBad = family
+			}
 		}
 	}
 
@@ -303,15 +317,16 @@ func (a *Aggregator) Finalize(resolver ProcessResolver) []FlowRecord {
 		}
 		dstsBySrc[rec.SrcIP][rec.DstIP] = struct{}{}
 	}
+	scanCfg := config.Get().Scoring
 	for i := range records {
 		n := len(dstsBySrc[records[i].SrcIP])
 		var bonus float64
 		var reason string
 		switch {
-		case n >= 20:
+		case n >= scanCfg.ScanConfirmedDests:
 			bonus = 3.0
 			reason = fmt.Sprintf("scan pattern: %d unique destinations from same source", n)
-		case n >= 8:
+		case n >= scanCfg.ScanPossibleDests:
 			bonus = 1.5
 			reason = fmt.Sprintf("possible scan: %d unique destinations from same source", n)
 		}
@@ -378,6 +393,7 @@ var suspiciousCmdlinePatterns = []*regexp.Regexp{
 }
 
 func score(key FlowKey, rec FlowRecord, ts []time.Time) (float64, []string) {
+	cfg := config.Get().Scoring
 	var total float64
 	var reasons []string
 
@@ -388,10 +404,34 @@ func score(key FlowKey, rec FlowRecord, ts []time.Time) (float64, []string) {
 
 	// ── Port analysis ───────────────────────────────────────────────────────
 	// Skip scoring for IANA dynamic/ephemeral ports (49152–65535).
-	if why, bad := knownBadPorts[key.DstPort]; bad {
-		add(4.0, fmt.Sprintf("known high-risk port %d (%s)", key.DstPort, why))
-	} else if key.DstPort < 49152 && !standardPorts[key.DstPort] {
-		add(1.0, fmt.Sprintf("non-standard port %d", key.DstPort))
+	if !cfg.DisablePortScoring {
+		effectiveBadPorts := knownBadPorts
+		if len(cfg.ExtraBadPorts) > 0 {
+			effectiveBadPorts = make(map[uint16]string, len(knownBadPorts)+len(cfg.ExtraBadPorts))
+			for k, v := range knownBadPorts {
+				effectiveBadPorts[k] = v
+			}
+			for _, p := range cfg.ExtraBadPorts {
+				if effectiveBadPorts[uint16(p)] == "" {
+					effectiveBadPorts[uint16(p)] = "user-defined bad port"
+				}
+			}
+		}
+		effectiveStdPorts := standardPorts
+		if len(cfg.ExtraStandardPorts) > 0 {
+			effectiveStdPorts = make(map[uint16]bool, len(standardPorts)+len(cfg.ExtraStandardPorts))
+			for k, v := range standardPorts {
+				effectiveStdPorts[k] = v
+			}
+			for _, p := range cfg.ExtraStandardPorts {
+				effectiveStdPorts[uint16(p)] = true
+			}
+		}
+		if why, bad := effectiveBadPorts[key.DstPort]; bad {
+			add(4.0, fmt.Sprintf("known high-risk port %d (%s)", key.DstPort, why))
+		} else if key.DstPort < 49152 && !effectiveStdPorts[key.DstPort] {
+			add(1.0, fmt.Sprintf("non-standard port %d", key.DstPort))
+		}
 	}
 
 	// ── DNS analysis ────────────────────────────────────────────────────────
@@ -408,25 +448,42 @@ func score(key FlowKey, rec FlowRecord, ts []time.Time) (float64, []string) {
 		}
 	}
 
+	// ── JA3 TLS fingerprint ─────────────────────────────────────────────────
+	if rec.JA3KnownBad != "" {
+		add(4.0, fmt.Sprintf("JA3 fingerprint matches known malware: %s [%s]", rec.JA3KnownBad, rec.JA3Hash))
+	}
+
 	// ── GeoIP / threat intelligence ─────────────────────────────────────────
 	if rec.GeoHighRisk {
 		add(1.5, fmt.Sprintf("destination in high-risk ASN: %s", rec.ASNOrg))
 	}
 
 	// ── Process / binary analysis ───────────────────────────────────────────
-	if rec.PID > 0 && rec.BinaryPath == "" {
-		add(1.0, "could not resolve binary path for PID")
-	}
-	for _, prefix := range suspiciousPathPrefixes {
-		if strings.Contains(rec.BinaryPath, prefix) {
-			add(2.5, fmt.Sprintf("binary running from suspicious path: %s", rec.BinaryPath))
-			break
+	if !cfg.DisableBinaryPathScoring {
+		if rec.PID > 0 && rec.BinaryPath == "" {
+			add(1.0, "could not resolve binary path for PID")
+		}
+		effectivePaths := suspiciousPathPrefixes
+		if len(cfg.ExtraSuspiciousPaths) > 0 {
+			effectivePaths = append(effectivePaths, cfg.ExtraSuspiciousPaths...)
+		}
+		for _, prefix := range effectivePaths {
+			if strings.Contains(rec.BinaryPath, prefix) {
+				add(2.5, fmt.Sprintf("binary running from suspicious path: %s", rec.BinaryPath))
+				break
+			}
 		}
 	}
 
 	// ── Cmdline analysis ────────────────────────────────────────────────────
-	if rec.Cmdline != "" {
-		for _, re := range suspiciousCmdlinePatterns {
+	if !cfg.DisableCmdlineScoring && rec.Cmdline != "" {
+		effectivePatterns := suspiciousCmdlinePatterns
+		for _, pat := range cfg.ExtraCmdlinePatterns {
+			if re, err := regexp.Compile(pat); err == nil {
+				effectivePatterns = append(effectivePatterns, re)
+			}
+		}
+		for _, re := range effectivePatterns {
 			if re.MatchString(rec.Cmdline) {
 				add(2.0, fmt.Sprintf("suspicious cmdline pattern %q in: %s", re.String(), rec.Cmdline))
 				break
@@ -435,7 +492,7 @@ func score(key FlowKey, rec FlowRecord, ts []time.Time) (float64, []string) {
 	}
 
 	// ── Beaconing detection ─────────────────────────────────────────────────
-	if bs, reason := beaconingScore(ts); bs > 0 {
+	if bs, reason := beaconingScore(ts, cfg); bs > 0 {
 		add(bs, reason)
 	}
 
@@ -452,10 +509,9 @@ func score(key FlowKey, rec FlowRecord, ts []time.Time) (float64, []string) {
 
 // beaconingScore computes a score contribution based on inter-arrival
 // time regularity. Low coefficient-of-variation → beaconing.
-func beaconingScore(ts []time.Time) (float64, string) {
-	// Require at least 5 packets for statistical validity:
-	// fewer packets → fewer than 4 inter-arrival times → CV is noise.
-	if len(ts) < 5 {
+func beaconingScore(ts []time.Time, cfg config.ScoringConfig) (float64, string) {
+	// Require at least cfg.BeaconingMinPackets for statistical validity.
+	if len(ts) < cfg.BeaconingMinPackets {
 		return 0, ""
 	}
 	iats := make([]float64, len(ts)-1)
@@ -479,9 +535,9 @@ func beaconingScore(ts []time.Time) (float64, string) {
 	cv := math.Sqrt(variance) / mean
 
 	switch {
-	case cv < 0.15:
+	case cv < cfg.BeaconingStrongCV:
 		return 3.5, fmt.Sprintf("strong beaconing pattern (interval CV=%.2f, mean=%.0f ms)", cv, mean)
-	case cv < 0.30:
+	case cv < cfg.BeaconingPossibleCV:
 		return 2.0, fmt.Sprintf("possible beaconing (interval CV=%.2f, mean=%.0f ms)", cv, mean)
 	default:
 		return 0, ""
@@ -516,7 +572,7 @@ func lookupReverseDNS(ip string) string {
 
 // doLookupReverseDNS performs the actual PTR query with a 200 ms deadline.
 func doLookupReverseDNS(ip string) string {
-	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(config.Get().Capture.DNSTimeoutMS)*time.Millisecond)
 	defer cancel()
 	r := &net.Resolver{}
 	names, err := r.LookupAddr(ctx, ip)
@@ -557,14 +613,15 @@ func isHighEntropyDomain(fqdn string) bool {
 	if len(parts) <= 2 {
 		return false
 	}
+	dnsCfg := config.Get().Scoring
 	for _, label := range parts[:len(parts)-2] {
 		if len(label) == 0 {
 			continue
 		}
-		if len(label) > 40 {
+		if len(label) > dnsCfg.DNSLabelLenThreshold {
 			return true
 		}
-		if shannonEntropy(label) > 3.5 {
+		if shannonEntropy(label) > dnsCfg.DNSEntropyThreshold {
 			return true
 		}
 	}

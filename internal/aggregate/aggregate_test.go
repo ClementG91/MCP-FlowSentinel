@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/ClementG91/MCP-FlowSentinel/internal/config"
 )
 
 // ─── beaconingScore tests ──────────────────────────────────────────────────────
@@ -17,7 +19,7 @@ func TestBeaconingScore_Regular(t *testing.T) {
 	for i := range ts {
 		ts[i] = base.Add(time.Duration(i) * time.Second)
 	}
-	got, reason := beaconingScore(ts)
+	got, reason := beaconingScore(ts, config.Default().Scoring)
 	if got < 3.0 {
 		t.Errorf("expected score ≥ 3.0 for perfectly regular intervals, got %.2f", got)
 	}
@@ -44,7 +46,7 @@ func TestBeaconingScore_Irregular(t *testing.T) {
 	for i, g := range gaps {
 		ts[i+1] = ts[i].Add(g)
 	}
-	got, _ := beaconingScore(ts)
+	got, _ := beaconingScore(ts, config.Default().Scoring)
 	if got > 0 {
 		t.Errorf("expected 0 score for irregular intervals, got %.2f", got)
 	}
@@ -58,7 +60,7 @@ func TestBeaconingScore_TooFew(t *testing.T) {
 		time.Now().Add(2 * time.Second),
 		time.Now().Add(3 * time.Second),
 	}
-	got, _ := beaconingScore(ts)
+	got, _ := beaconingScore(ts, config.Default().Scoring)
 	if got != 0 {
 		t.Errorf("expected 0 score with only 4 timestamps, got %.2f", got)
 	}
@@ -745,7 +747,7 @@ func TestBeaconingScore_MeanNearZero_ReturnsZero(t *testing.T) {
 	// All timestamps identical → all inter-arrival times = 0 ms → mean < 1 → return 0.
 	now := time.Now()
 	ts := []time.Time{now, now, now, now, now, now}
-	got, _ := beaconingScore(ts)
+	got, _ := beaconingScore(ts, config.Default().Scoring)
 	if got != 0 {
 		t.Errorf("mean near zero should return 0 score, got %.2f", got)
 	}
@@ -764,7 +766,7 @@ func TestBeaconingScore_PossibleBeaconing(t *testing.T) {
 		}
 		ts[i] = ts[i-1].Add(gap)
 	}
-	got, reason := beaconingScore(ts)
+	got, reason := beaconingScore(ts, config.Default().Scoring)
 	if got < 1.5 {
 		t.Errorf("alternating 800/1200ms gaps should score ≥1.5 (possible beaconing), got %.2f", got)
 	}
