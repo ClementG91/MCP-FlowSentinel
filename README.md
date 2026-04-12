@@ -354,6 +354,7 @@ scoring:
   beaconing_possible_cv: 0.30     # CV < this → possible beaconing (+2.0)
   beaconing_min_packets: 5        # Minimum packets required
   dns_entropy_threshold: 3.5      # Shannon entropy above this → suspicious
+  dns_label_len_threshold: 40    # Label length above this → suspicious
   scan_confirmed_destinations: 20 # >= N unique dsts → confirmed port scan
   # Add ports/paths/patterns to the built-in detection lists:
   extra_bad_ports: [8888, 9999]
