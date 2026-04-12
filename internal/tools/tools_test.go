@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -231,6 +232,9 @@ func TestAnalyzePcap_FileNotFound(t *testing.T) {
 }
 
 func TestAnalyzePcap_ValidFile_ReturnsJSON(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("pcap.OpenOffline requires wpcap.dll which is not available on Windows CI runners")
+	}
 	// Build a pcap file with real IPv4/TCP packets.
 	rawPkt := toolsBuildIPv4TCPRaw(t, "10.0.0.1", "10.0.0.2", 12345, 80)
 	path := toolsWritePcapFile(t, [][]byte{rawPkt, rawPkt, rawPkt})
@@ -258,6 +262,9 @@ func TestAnalyzePcap_ValidFile_ReturnsJSON(t *testing.T) {
 }
 
 func TestAnalyzePcap_ValidFile_WithFilters(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("pcap.OpenOffline requires wpcap.dll which is not available on Windows CI runners")
+	}
 	rawPkt := toolsBuildIPv4TCPRaw(t, "10.0.0.1", "10.0.0.2", 12345, 443)
 	path := toolsWritePcapFile(t, [][]byte{rawPkt})
 
@@ -612,6 +619,9 @@ func TestMakeResolver_MissReturnsNil(t *testing.T) {
 // TestAnalyzePcap_ValidFile_WithPositiveMinScore covers the minScore = v
 // assignment that is skipped when min_score == 0.
 func TestAnalyzePcap_ValidFile_WithPositiveMinScore(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("pcap.OpenOffline requires wpcap.dll which is not available on Windows CI runners")
+	}
 	rawPkt := toolsBuildIPv4TCPRaw(t, "10.0.0.1", "10.0.0.2", 12345, 443)
 	path := toolsWritePcapFile(t, [][]byte{rawPkt})
 
