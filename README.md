@@ -244,9 +244,10 @@ Each flow is scored 0–10 based on multiple signals:
 | High-entropy DNS subdomain (entropy > 3.5 or label > 40 chars) | +2.5 | DNS exfiltration / C2 over DNS |
 | Destination in high-risk ASN (bulletproof hosters) | +1.5 | Known abuse-tolerant infrastructure |
 | Suspicious binary path (`/tmp`, `AppData\Local\Temp` …) | +2.5 | Classic implant staging location |
+| Unresolved binary path (PID known, path lookup failed) | +1.0 | Process hiding or rapid exit |
 | Suspicious cmdline pattern (`base64 -d`, `curl\|sh`, `python -c` …) | +2.0 | One-liner attacker techniques |
-| Beaconing — strong (interval CV < 0.15, min 3 packets) | +3.5 | C2 heartbeat pattern |
-| Beaconing — possible (interval CV < 0.30, min 3 packets) | +2.0 | Possible C2 communication |
+| Beaconing — strong (interval CV < 0.15, min 5 packets) | +3.5 | C2 heartbeat pattern |
+| Beaconing — possible (interval CV < 0.30, min 5 packets) | +2.0 | Possible C2 communication |
 | Port scan — confirmed (≥ 20 unique destinations) | +3.0 | Active network scan |
 | Port scan — possible (≥ 8 unique destinations) | +1.5 | Possible scan activity |
 | Large transfer (> 5 MB) | +0.5 | Bulk exfiltration indicator |

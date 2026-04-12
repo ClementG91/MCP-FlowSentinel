@@ -2,6 +2,7 @@ package correlate
 
 import (
 	"fmt"
+	"os"
 	"testing"
 )
 
@@ -77,5 +78,127 @@ func TestSocketTable_Miss(t *testing.T) {
 	info := table.Lookup("1.2.3.4", 9999, "5.6.7.8", 7777, "UDP")
 	if info != nil {
 		t.Errorf("expected nil for unknown flow, got %+v", info)
+	}
+}
+
+func TestProtoName(t *testing.T) {
+	tests := []struct {
+		sockType uint32
+		want     string
+	}{
+		{1, "TCP"},
+		{2, "UDP"},
+		{3, "SOCK3"},
+		{99, "SOCK99"},
+	}
+	for _, tc := range tests {
+		if got := protoName(tc.sockType); got != tc.want {
+			t.Errorf("protoName(%d) = %q, want %q", tc.sockType, got, tc.want)
+		}
+	}
+}
+
+// ─── BuildSocketTable ─────────────────────────────────────────────────────────
+
+func TestBuildSocketTable_ReturnsValidTable(t *testing.T) {
+	table := BuildSocketTable()
+	if table == nil {
+		t.Fatal("BuildSocketTable returned nil")
+	}
+	// Lookup on an empty or live-populated table must never panic.
+	_ = table.Lookup("127.0.0.1", 0, "127.0.0.1", 0, "TCP")
+}
+
+// ─── GetAllConnections ────────────────────────────────────────────────────────
+
+func TestGetAllConnections_ReturnsMap(t *testing.T) {
+	m, err := GetAllConnections()
+	if err != nil {
+		t.Skipf("GetAllConnections failed (acceptable in sandboxed env): %v", err)
+	}
+	if m == nil {
+		t.Fatal("expected non-nil map")
+	}
+}
+
+// ─── resolveProcess ───────────────────────────────────────────────────────────
+
+func TestResolveProcess_CurrentProcess(t *testing.T) {
+	pid := int32(os.Getpid())
+	cache := make(map[int32]*ProcessInfo)
+
+	info := resolveProcess(pid, cache)
+	if info == nil {
+		t.Fatal("expected non-nil ProcessInfo for current process")
+	}
+	if info.PID != pid {
+		t.Errorf("PID = %d, want %d", info.PID, pid)
+	}
+	if info.Name == "" {
+		t.Error("expected non-empty Name for current process")
+	}
+	// Second call must return the cached pointer.
+	info2 := resolveProcess(pid, cache)
+	if info2 != info {
+		t.Error("second call should return the cached pointer")
+	}
+}
+
+func TestResolveProcess_PIDZero_ReturnsEmptyInfo(t *testing.T) {
+	cache := make(map[int32]*ProcessInfo)
+	info := resolveProcess(0, cache)
+	if info == nil {
+		t.Fatal("expected non-nil ProcessInfo for PID 0")
+	}
+	if info.PID != 0 {
+		t.Errorf("PID = %d, want 0", info.PID)
+	}
+	// Name is empty for PID 0 (kernel pseudo-process).
+	if info.Name != "" {
+		t.Logf("PID 0 name = %q (OS-dependent, not an error)", info.Name)
+	}
+}
+
+func TestResolveProcess_NonExistentPID_ReturnsPlaceholder(t *testing.T) {
+	cache := make(map[int32]*ProcessInfo)
+	info := resolveProcess(999999999, cache)
+	if info == nil {
+		t.Fatal("expected non-nil placeholder for non-existent PID")
+	}
+	if info.PID != 999999999 {
+		t.Errorf("PID = %d, want 999999999", info.PID)
+	}
+}
+
+// ─── resolveProcessName ───────────────────────────────────────────────────────
+
+func TestResolveProcessName_CurrentProcess_ReturnsName(t *testing.T) {
+	cache := make(map[int32]*ProcessInfo)
+	name := resolveProcessName(int32(os.Getpid()), cache)
+	if name == "" {
+		t.Error("expected non-empty name for current process")
+	}
+	// Second call must use cache (same result).
+	name2 := resolveProcessName(int32(os.Getpid()), cache)
+	if name2 != name {
+		t.Errorf("cache miss on second call: got %q, want %q", name2, name)
+	}
+}
+
+func TestResolveProcessName_NonExistentPID_ReturnsEmpty(t *testing.T) {
+	cache := make(map[int32]*ProcessInfo)
+	name := resolveProcessName(999999999, cache)
+	if name != "" {
+		t.Errorf("expected empty name for non-existent PID, got %q", name)
+	}
+}
+
+func TestResolveProcessName_UsesCache(t *testing.T) {
+	cache := map[int32]*ProcessInfo{
+		42: {PID: 42, Name: "cached-proc"},
+	}
+	name := resolveProcessName(42, cache)
+	if name != "cached-proc" {
+		t.Errorf("expected cached name %q, got %q", "cached-proc", name)
 	}
 }

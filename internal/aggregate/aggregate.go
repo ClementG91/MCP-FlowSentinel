@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ClementG91/MCP-FlowSentinel/internal/cache"
 	"github.com/ClementG91/MCP-FlowSentinel/internal/intel"
 )
 
@@ -22,15 +23,10 @@ const dnsWorkers = 20
 // dnsCacheTTL is how long a resolved (or negative) PTR result is reused.
 const dnsCacheTTL = 5 * time.Minute
 
-// dnsEntry is one cached PTR record.
-type dnsEntry struct {
-	hostname string
-	expiry   time.Time
-}
-
-// dnsCache is the package-level reverse-DNS cache, persistent across tool calls.
-// Key: IP string → value: dnsEntry. Negative results are also cached.
-var dnsCache sync.Map
+// dnsCache is the package-level reverse-DNS LRU cache, bounded at 10 000 entries.
+// Key: IP string → hostname string ("" for negative results).
+// Entries expire after dnsCacheTTL; the LRU evicts oldest entries at capacity.
+var dnsCache = cache.New[string, string](10_000)
 
 // privateNetworks holds all RFC 1918, loopback, and link-local ranges
 // pre-parsed at init time for fast membership tests.
@@ -457,7 +453,9 @@ func score(key FlowKey, rec FlowRecord, ts []time.Time) (float64, []string) {
 // beaconingScore computes a score contribution based on inter-arrival
 // time regularity. Low coefficient-of-variation → beaconing.
 func beaconingScore(ts []time.Time) (float64, string) {
-	if len(ts) < 3 {
+	// Require at least 5 packets for statistical validity:
+	// fewer packets → fewer than 4 inter-arrival times → CV is noise.
+	if len(ts) < 5 {
 		return 0, ""
 	}
 	iats := make([]float64, len(ts)-1)
@@ -504,18 +502,15 @@ func riskLabel(score float64) string {
 	}
 }
 
-// lookupReverseDNS returns the PTR hostname for ip, using a package-level
-// TTL cache to avoid redundant DNS queries across repeated tool calls.
+// lookupReverseDNS returns the PTR hostname for ip, using a bounded LRU cache
+// to avoid redundant DNS queries across repeated tool calls.
+// Empty string is cached for negative results (no PTR record).
 func lookupReverseDNS(ip string) string {
-	now := time.Now()
-	if v, ok := dnsCache.Load(ip); ok {
-		e := v.(dnsEntry)
-		if now.Before(e.expiry) {
-			return e.hostname
-		}
+	if hostname, ok := dnsCache.Get(ip); ok {
+		return hostname
 	}
 	hostname := doLookupReverseDNS(ip)
-	dnsCache.Store(ip, dnsEntry{hostname: hostname, expiry: now.Add(dnsCacheTTL)})
+	dnsCache.Set(ip, hostname, dnsCacheTTL)
 	return hostname
 }
 

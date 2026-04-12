@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -161,10 +162,24 @@ func filterFlows(flows []aggregate.FlowRecord, opts QueryOpts) []aggregate.FlowR
 		}
 		out = append(out, f)
 	}
+	// Sort by suspicion score descending before applying TopN so the caller
+	// always receives the highest-risk flows, regardless of JSONL order.
+	sort.Slice(out, func(i, j int) bool {
+		return out[i].SuspicionScore > out[j].SuspicionScore
+	})
 	if opts.TopN > 0 && len(out) > opts.TopN {
 		out = out[:opts.TopN]
 	}
 	return out
+}
+
+// SetPathForTesting overrides the history file path.
+// Must only be called from tests — not safe for concurrent use with Append/Query.
+func SetPathForTesting(path string) {
+	mu.Lock()
+	defer mu.Unlock()
+	histPath = path
+	atomic.StoreInt64(&appendCount, 0)
 }
 
 // pruneOld rewrites the history file removing entries older than maxAge.

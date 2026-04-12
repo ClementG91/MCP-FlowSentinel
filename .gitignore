@@ -1,5 +1,19 @@
+# Binaries
 mcp-flowsentinel
 mcp-flowsentinel.exe
-*.exe~
-.claude/
 mcp-flowsentinel.exe.old
+*.exe~
+
+# Build artifacts
+dist/
+
+# IDE / editor
+.claude/
+.DS_Store
+Thumbs.db
+ehthumbs.db
+
+# Go test / coverage output
+*.out
+coverage*.html
+cov_*.html

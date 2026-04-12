@@ -17,9 +17,11 @@ import (
 
 const (
 	repo    = "ClementG91/MCP-FlowSentinel"
-	apiBase = "https://api.github.com"
 	timeout = 30 * time.Second
 )
+
+// apiBase is a var so tests can point it at an httptest.Server.
+var apiBase = "https://api.github.com"
 
 // Release holds the fields we need from the GitHub Releases API.
 type Release struct {

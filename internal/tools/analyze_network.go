@@ -182,7 +182,11 @@ func analyzeNetworkHandler(ctx context.Context, req mcp.CallToolRequest) (*mcp.C
 // Extracted here so analyze_pcap can share the exact same mapping logic.
 func makeResolver(tablePtr *atomic.Pointer[correlate.SocketTable]) aggregate.ProcessResolver {
 	return func(srcIP string, srcPort uint16, dstIP string, dstPort uint16, proto string) *aggregate.ProcessSnapshot {
-		info := tablePtr.Load().Lookup(srcIP, srcPort, dstIP, dstPort, proto)
+		tbl := tablePtr.Load()
+		if tbl == nil {
+			return nil
+		}
+		info := tbl.Lookup(srcIP, srcPort, dstIP, dstPort, proto)
 		if info == nil {
 			return nil
 		}
