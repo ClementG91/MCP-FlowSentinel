@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"os"
@@ -11,6 +12,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/ClementG91/MCP-FlowSentinel/internal/alerting"
+	"github.com/ClementG91/MCP-FlowSentinel/internal/aggregate"
 	"github.com/ClementG91/MCP-FlowSentinel/internal/capture"
 	"github.com/ClementG91/MCP-FlowSentinel/internal/config"
 	"github.com/ClementG91/MCP-FlowSentinel/internal/daemon"
@@ -71,6 +74,20 @@ func main() {
 			fmt.Printf("Config written to: %s\n", path)
 			fmt.Println("Edit it then restart the server (or run with --config <path>).")
 			return
+		case "--validate-config":
+			cfg := config.Get()
+			data, _ := json.MarshalIndent(map[string]any{
+				"status":      "ok",
+				"loaded_from": config.LoadedPath(),
+				"alerting_enabled": cfg.Alerting.Enabled,
+				"min_score_threshold": cfg.Alerting.MinScoreThreshold,
+			}, "", "  ")
+			fmt.Println(string(data))
+			fmt.Fprintln(os.Stderr, "Config valid.")
+			return
+		case "--test-alert":
+			runTestAlert()
+			return
 		case "--daemon":
 			runDaemon()
 			return
@@ -81,6 +98,8 @@ func main() {
 			fmt.Fprintf(os.Stderr, "  --daemon          Run continuous background monitoring + MCP server\n")
 			fmt.Fprintf(os.Stderr, "  --check           Verify pcap access and list interfaces\n")
 			fmt.Fprintf(os.Stderr, "  --init-config     Write a default config.yaml and exit\n")
+			fmt.Fprintf(os.Stderr, "  --validate-config Validate loaded config and exit\n")
+			fmt.Fprintf(os.Stderr, "  --test-alert      Send a test webhook alert and exit\n")
 			fmt.Fprintf(os.Stderr, "  --update          Update to the latest release\n")
 			fmt.Fprintf(os.Stderr, "  --version         Print version and exit\n\n")
 			fmt.Fprintf(os.Stderr, "Options:\n")
@@ -223,4 +242,37 @@ func runCheck() {
 		fmt.Println("Some checks failed — see [WARN]/[FAIL] above.")
 		os.Exit(1)
 	}
+}
+
+// runTestAlert fires a synthetic webhook alert to verify alerting configuration.
+// It bypasses the dedup window so it always sends.
+func runTestAlert() {
+	cfg := config.Get()
+	if !cfg.Alerting.Enabled {
+		fmt.Fprintln(os.Stderr, "[WARN] Alerting is disabled in config (alerting.enabled = false).")
+		fmt.Fprintln(os.Stderr, "       Set alerting.enabled: true and alerting.webhook_url to test.")
+		os.Exit(1)
+	}
+	if cfg.Alerting.WebhookURL == "" {
+		fmt.Fprintln(os.Stderr, "[FAIL] alerting.webhook_url is not set.")
+		os.Exit(1)
+	}
+
+	testFlow := aggregate.FlowRecord{
+		SrcIP:            "192.0.2.1",
+		DstIP:            "203.0.113.42",
+		SrcPort:          uint16(54321),
+		DstPort:          uint16(443),
+		Protocol:         "TCP",
+		ProcessName:      "test-alert",
+		SuspicionScore:   cfg.Alerting.MinScoreThreshold + 1,
+		RiskLevel:        "TEST",
+		SuspicionReasons: []string{"test alert — verify webhook connectivity"},
+	}
+
+	if err := alerting.FireTest(testFlow); err != nil {
+		fmt.Fprintf(os.Stderr, "[FAIL] Test alert failed: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Println("[OK] Test alert sent successfully.")
 }

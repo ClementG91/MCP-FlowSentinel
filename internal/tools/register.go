@@ -11,4 +11,8 @@ func Register(s *server.MCPServer) {
 	registerGetProcessMap(s)
 	registerGetFlowHistory(s)
 	registerAnalyzeProcess(s)
+	registerGetConfig(s)
+	registerGetDaemonStats(s)
+	registerGetAlerts(s)
+	registerReloadConfig(s)
 }

@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -253,4 +254,173 @@ func TestDefaultPath_NonEmpty(t *testing.T) {
 	if p == "" {
 		t.Error("DefaultPath() returned empty string")
 	}
+}
+
+func TestLoadedPath_AfterLoad_ReturnsPath(t *testing.T) {
+	original := Get()
+	defer Set(original)
+
+	yaml := `capture:
+  default_duration_seconds: 5
+  max_duration_seconds: 60
+  dns_timeout_ms: 200
+  dns_workers: 20
+scoring:
+  beaconing_strong_cv: 0.15
+  beaconing_possible_cv: 0.30
+  beaconing_min_packets: 5
+  dns_entropy_threshold: 3.5
+  scan_confirmed_destinations: 20
+  scan_possible_destinations: 8
+history:
+  max_size_mb: 50
+  max_age_hours: 24
+  prune_to_hours: 12
+daemon:
+  capture_interval_seconds: 300
+`
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte(yaml), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	if _, err := Load(path); err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got := LoadedPath(); got != path {
+		t.Errorf("LoadedPath() = %q, want %q", got, path)
+	}
+}
+
+func TestReload_ReappliesConfig(t *testing.T) {
+	original := Get()
+	defer Set(original)
+
+	yaml := `capture:
+  default_duration_seconds: 7
+  max_duration_seconds: 60
+  dns_timeout_ms: 200
+  dns_workers: 20
+scoring:
+  beaconing_strong_cv: 0.15
+  beaconing_possible_cv: 0.30
+  beaconing_min_packets: 5
+  dns_entropy_threshold: 3.5
+  scan_confirmed_destinations: 20
+  scan_possible_destinations: 8
+history:
+  max_size_mb: 50
+  max_age_hours: 24
+  prune_to_hours: 12
+daemon:
+  capture_interval_seconds: 300
+`
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte(yaml), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	if _, err := Load(path); err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	// Mutate in memory — Reload should restore from file.
+	cfg := Get()
+	cfg.Capture.DefaultDurationSec = 99
+	Set(cfg)
+
+	reloaded, err := Reload()
+	if err != nil {
+		t.Fatalf("Reload: %v", err)
+	}
+	if reloaded.Capture.DefaultDurationSec != 7 {
+		t.Errorf("after Reload, DefaultDurationSec = %d, want 7", reloaded.Capture.DefaultDurationSec)
+	}
+}
+
+func TestCompiledExtraCmdlinePatterns_PopulatedOnLoad(t *testing.T) {
+	original := Get()
+	defer Set(original)
+
+	yaml := `capture:
+  default_duration_seconds: 5
+  max_duration_seconds: 60
+  dns_timeout_ms: 200
+  dns_workers: 20
+scoring:
+  beaconing_strong_cv: 0.15
+  beaconing_possible_cv: 0.30
+  beaconing_min_packets: 5
+  dns_entropy_threshold: 3.5
+  scan_confirmed_destinations: 20
+  scan_possible_destinations: 8
+  extra_cmdline_patterns:
+    - "(?i)mshta\\.exe"
+    - "(?i)regsvr32"
+history:
+  max_size_mb: 50
+  max_age_hours: 24
+  prune_to_hours: 12
+daemon:
+  capture_interval_seconds: 300
+`
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte(yaml), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(cfg.Scoring.CompiledExtraCmdlinePatterns) != 2 {
+		t.Errorf("expected 2 compiled patterns, got %d", len(cfg.Scoring.CompiledExtraCmdlinePatterns))
+	}
+	if !cfg.Scoring.CompiledExtraCmdlinePatterns[0].MatchString("MSHTA.EXE") {
+		t.Error("first pattern should match MSHTA.EXE (case-insensitive)")
+	}
+}
+
+func TestCompiledExtraCmdlinePatterns_SkipsInvalidPattern(t *testing.T) {
+	cfg := Default()
+	cfg.Scoring.ExtraCmdlinePatterns = []string{"(?i)valid", "[invalid"}
+	compileScoringPatterns(cfg)
+	// Only the valid pattern should be compiled.
+	if len(cfg.Scoring.CompiledExtraCmdlinePatterns) != 1 {
+		t.Errorf("expected 1 compiled pattern (invalid skipped), got %d", len(cfg.Scoring.CompiledExtraCmdlinePatterns))
+	}
+}
+
+func TestAlertingMinScoreThreshold_Validation(t *testing.T) {
+	original := Get()
+	defer Set(original)
+
+	tests := []struct {
+		name      string
+		threshold float64
+		wantErr   bool
+	}{
+		{"valid_zero", 0.0, false},
+		{"valid_mid", 5.0, false},
+		{"valid_max", 10.0, false},
+		{"negative", -1.0, true},
+		{"above_max", 11.0, true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			yamlContent := "capture:\n  default_duration_seconds: 5\n  max_duration_seconds: 60\n  dns_timeout_ms: 200\n  dns_workers: 20\nscoring:\n  beaconing_strong_cv: 0.15\n  beaconing_possible_cv: 0.30\n  beaconing_min_packets: 5\n  dns_entropy_threshold: 3.5\n  scan_confirmed_destinations: 20\n  scan_possible_destinations: 8\nhistory:\n  max_size_mb: 50\n  max_age_hours: 24\n  prune_to_hours: 12\ndaemon:\n  capture_interval_seconds: 300\nalerting:\n  min_score_threshold: " + formatFloat(tc.threshold) + "\n"
+			path := filepath.Join(t.TempDir(), "config.yaml")
+			if err := os.WriteFile(path, []byte(yamlContent), 0o600); err != nil {
+				t.Fatalf("WriteFile: %v", err)
+			}
+			_, err := Load(path)
+			if tc.wantErr && err == nil {
+				t.Errorf("Load(%s) should return validation error for threshold %v", tc.name, tc.threshold)
+			}
+			if !tc.wantErr && err != nil {
+				t.Errorf("Load(%s) returned unexpected error: %v", tc.name, err)
+			}
+		})
+	}
+}
+
+func formatFloat(f float64) string {
+	return fmt.Sprintf("%g", f)
 }

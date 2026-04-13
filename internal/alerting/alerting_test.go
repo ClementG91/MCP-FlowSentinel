@@ -2,6 +2,7 @@ package alerting
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -167,6 +168,206 @@ func TestFire_BadHTTPStatus_LogsNotPanics(t *testing.T) {
 	Fire([]aggregate.FlowRecord{highFlow(8.0)})
 	time.Sleep(200 * time.Millisecond)
 	// Just verifying no panic.
+}
+
+func TestFire_Deduplication_SuppressesRepeat(t *testing.T) {
+	received := make(chan struct{}, 10)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		received <- struct{}{}
+		w.WriteHeader(200)
+	}))
+	defer srv.Close()
+
+	original := config.Get()
+	defer config.Set(original)
+	ResetDedupForTesting()
+
+	cfg := config.Default()
+	cfg.Alerting.Enabled = true
+	cfg.Alerting.WebhookURL = srv.URL
+	cfg.Alerting.MinScoreThreshold = 5.0
+	cfg.Alerting.DeduplicationWindowSec = 60
+	config.Set(cfg)
+
+	flow := highFlow(8.0)
+	Fire([]aggregate.FlowRecord{flow})
+	// Wait for the first alert to land.
+	select {
+	case <-received:
+	case <-time.After(3 * time.Second):
+		t.Fatal("first alert not received within 3s")
+	}
+	// Second Fire for the same flow key — dedup should suppress it.
+	Fire([]aggregate.FlowRecord{flow})
+	time.Sleep(200 * time.Millisecond) // give it time to (not) fire
+	if len(received) != 0 {
+		t.Errorf("expected dedup to suppress second alert, but %d additional calls occurred", len(received))
+	}
+}
+
+func TestFire_Deduplication_AllowsDifferentFlows(t *testing.T) {
+	received := make(chan struct{}, 10)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		received <- struct{}{}
+		w.WriteHeader(200)
+	}))
+	defer srv.Close()
+
+	original := config.Get()
+	defer config.Set(original)
+	ResetDedupForTesting()
+
+	cfg := config.Default()
+	cfg.Alerting.Enabled = true
+	cfg.Alerting.WebhookURL = srv.URL
+	cfg.Alerting.MinScoreThreshold = 5.0
+	cfg.Alerting.DeduplicationWindowSec = 60
+	config.Set(cfg)
+
+	flow1 := aggregate.FlowRecord{SrcIP: "10.0.0.1", DstIP: "1.2.3.4", SrcPort: 111, DstPort: 443, Protocol: "TCP", SuspicionScore: 8.0}
+	flow2 := aggregate.FlowRecord{SrcIP: "10.0.0.2", DstIP: "1.2.3.5", SrcPort: 222, DstPort: 80, Protocol: "TCP", SuspicionScore: 8.0}
+
+	Fire([]aggregate.FlowRecord{flow1, flow2})
+
+	got := 0
+	deadline := time.After(3 * time.Second)
+	for got < 2 {
+		select {
+		case <-received:
+			got++
+		case <-deadline:
+			t.Errorf("expected 2 webhook calls for distinct flows, got %d", got)
+			return
+		}
+	}
+}
+
+// ─── FiredCount ───────────────────────────────────────────────────────────────
+
+func TestFiredCount_IncrementsOnFire(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(200)
+	}))
+	defer srv.Close()
+
+	original := config.Get()
+	defer config.Set(original)
+	ResetDedupForTesting()
+
+	cfg := config.Default()
+	cfg.Alerting.Enabled = true
+	cfg.Alerting.WebhookURL = srv.URL
+	cfg.Alerting.MinScoreThreshold = 5.0
+	cfg.Alerting.DeduplicationWindowSec = 60
+	config.Set(cfg)
+
+	before := FiredCount()
+	Fire([]aggregate.FlowRecord{
+		{SrcIP: "99.0.0.1", DstIP: "99.0.0.2", SrcPort: 1, DstPort: 443, Protocol: "TCP", SuspicionScore: 9.0},
+	})
+	time.Sleep(150 * time.Millisecond)
+	after := FiredCount()
+
+	if after <= before {
+		t.Errorf("FiredCount did not increment: before=%d after=%d", before, after)
+	}
+}
+
+// ─── alert store ─────────────────────────────────────────────────────────────
+
+func TestWriteAlertRecord_GetAlerts_RoundTrip(t *testing.T) {
+	tmp := t.TempDir() + "/alerts.jsonl"
+	SetAlertLogPathForTesting(tmp)
+	t.Cleanup(func() { SetAlertLogPathForTesting(tmp) })
+
+	rec := AlertRecord{
+		Timestamp: time.Now().UTC(),
+		Severity:  "HIGH",
+		DedupeKey: "1.2.3.4:100->5.6.7.8:443/TCP",
+		Flow:      aggregate.FlowRecord{SrcIP: "1.2.3.4", DstIP: "5.6.7.8", SuspicionScore: 7.5},
+	}
+	writeAlertRecord(rec)
+
+	alerts, err := GetAlerts(AlertQueryOpts{MaxAgeHours: 24})
+	if err != nil {
+		t.Fatalf("GetAlerts: %v", err)
+	}
+	if len(alerts) != 1 {
+		t.Fatalf("expected 1 alert, got %d", len(alerts))
+	}
+	if alerts[0].Severity != "HIGH" {
+		t.Errorf("Severity = %q, want HIGH", alerts[0].Severity)
+	}
+	if alerts[0].Flow.SuspicionScore != 7.5 {
+		t.Errorf("SuspicionScore = %v, want 7.5", alerts[0].Flow.SuspicionScore)
+	}
+}
+
+func TestGetAlerts_MinScoreFilter(t *testing.T) {
+	tmp := t.TempDir() + "/alerts.jsonl"
+	SetAlertLogPathForTesting(tmp)
+	t.Cleanup(func() { SetAlertLogPathForTesting(tmp) })
+
+	writeAlertRecord(AlertRecord{
+		Timestamp: time.Now().UTC(),
+		Severity:  "LOW",
+		DedupeKey: "low",
+		Flow:      aggregate.FlowRecord{SuspicionScore: 3.0},
+	})
+	writeAlertRecord(AlertRecord{
+		Timestamp: time.Now().UTC(),
+		Severity:  "HIGH",
+		DedupeKey: "high",
+		Flow:      aggregate.FlowRecord{SuspicionScore: 8.0},
+	})
+
+	alerts, err := GetAlerts(AlertQueryOpts{MaxAgeHours: 24, MinScore: 5.0})
+	if err != nil {
+		t.Fatalf("GetAlerts: %v", err)
+	}
+	if len(alerts) != 1 {
+		t.Fatalf("expected 1 alert with score >= 5, got %d", len(alerts))
+	}
+	if alerts[0].Flow.SuspicionScore < 5.0 {
+		t.Errorf("returned alert with score below filter: %v", alerts[0].Flow.SuspicionScore)
+	}
+}
+
+func TestGetAlerts_TopN(t *testing.T) {
+	tmp := t.TempDir() + "/alerts.jsonl"
+	SetAlertLogPathForTesting(tmp)
+	t.Cleanup(func() { SetAlertLogPathForTesting(tmp) })
+
+	for i := 0; i < 5; i++ {
+		writeAlertRecord(AlertRecord{
+			Timestamp: time.Now().UTC(),
+			Severity:  "HIGH",
+			DedupeKey: fmt.Sprintf("flow-%d", i),
+			Flow:      aggregate.FlowRecord{SuspicionScore: 7.0},
+		})
+	}
+
+	alerts, err := GetAlerts(AlertQueryOpts{MaxAgeHours: 24, TopN: 3})
+	if err != nil {
+		t.Fatalf("GetAlerts: %v", err)
+	}
+	if len(alerts) != 3 {
+		t.Errorf("expected 3 alerts (TopN=3), got %d", len(alerts))
+	}
+}
+
+func TestGetAlerts_NoFile_ReturnsEmpty(t *testing.T) {
+	tmp := t.TempDir() + "/nonexistent_alerts.jsonl"
+	SetAlertLogPathForTesting(tmp)
+	t.Cleanup(func() { SetAlertLogPathForTesting(tmp) })
+
+	alerts, err := GetAlerts(AlertQueryOpts{MaxAgeHours: 24})
+	if err != nil {
+		t.Fatalf("GetAlerts on missing file: %v", err)
+	}
+	if alerts != nil {
+		t.Errorf("expected nil slice for missing file, got %v", alerts)
+	}
 }
 
 func TestFire_EnvVarWebhook_Overrides(t *testing.T) {

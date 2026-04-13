@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/ClementG91/MCP-FlowSentinel/internal/aggregate"
+	"github.com/ClementG91/MCP-FlowSentinel/internal/config"
 	"github.com/ClementG91/MCP-FlowSentinel/internal/correlate"
 	"github.com/ClementG91/MCP-FlowSentinel/internal/history"
 	"github.com/google/gopacket"
@@ -713,6 +714,126 @@ func TestAnalyzeProcess_MultipleMatches_SortInvoked(t *testing.T) {
 	}
 	if out.ProcessesFound < 2 {
 		t.Skipf("expected 2+ processes for name %q, got %d (race with process exit)", multiName, out.ProcessesFound)
+	}
+}
+
+// ─── get_config handler ───────────────────────────────────────────────────────
+
+func TestGetConfig_ReturnsValidJSON(t *testing.T) {
+	r, err := getConfigHandler(context.Background(), callReq(nil))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	text := resultText(t, r)
+	var out struct {
+		Scoring  any `json:"scoring"`
+		Alerting any `json:"alerting"`
+		Daemon   any `json:"daemon"`
+	}
+	if err := json.Unmarshal([]byte(text), &out); err != nil {
+		t.Fatalf("response is not valid JSON: %v\nbody: %s", err, text)
+	}
+	if out.Scoring == nil {
+		t.Error("expected scoring section in response")
+	}
+}
+
+func TestGetConfig_MasksWebhookURL(t *testing.T) {
+	original := config.Get()
+	defer config.Set(original)
+
+	cfg := config.Default()
+	cfg.Alerting.Enabled = true
+	cfg.Alerting.WebhookURL = "https://hooks.example.com/secret"
+	config.Set(cfg)
+
+	r, err := getConfigHandler(context.Background(), callReq(nil))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	text := resultText(t, r)
+	if strings.Contains(text, "secret") {
+		t.Error("webhook URL should be masked in get_config response")
+	}
+	if !strings.Contains(text, `"***"`) {
+		t.Error("expected masked webhook URL to appear as ***")
+	}
+}
+
+// ─── get_daemon_stats handler ────────────────────────────────────────────────
+
+func TestGetDaemonStats_ReturnsValidJSON(t *testing.T) {
+	r, err := getDaemonStatsHandler(context.Background(), callReq(nil))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	text := resultText(t, r)
+	var out struct {
+		Running bool `json:"running"`
+	}
+	if err := json.Unmarshal([]byte(text), &out); err != nil {
+		t.Fatalf("response is not valid JSON: %v\nbody: %s", err, text)
+	}
+	// Daemon is not running in test context.
+	if out.Running {
+		t.Error("expected daemon running=false in test context")
+	}
+}
+
+// ─── get_alerts handler ───────────────────────────────────────────────────────
+
+func TestGetAlerts_EmptyLog_ReturnsValidJSON(t *testing.T) {
+	r, err := getAlertsHandler(context.Background(), callReq(nil))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	text := resultText(t, r)
+	var out struct {
+		TotalAlerts int   `json:"total_alerts"`
+		Alerts      []any `json:"alerts"`
+	}
+	if err := json.Unmarshal([]byte(text), &out); err != nil {
+		t.Fatalf("response is not valid JSON: %v\nbody: %s", err, text)
+	}
+	if out.Alerts == nil {
+		t.Error("alerts field must not be null")
+	}
+}
+
+func TestGetAlerts_WithParams_ReturnsValidJSON(t *testing.T) {
+	r, err := getAlertsHandler(context.Background(), callReq(map[string]any{
+		"max_age_hours": float64(2),
+		"min_score":     float64(5.0),
+		"top_n":         float64(10),
+	}))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	text := resultText(t, r)
+	var out map[string]any
+	if err := json.Unmarshal([]byte(text), &out); err != nil {
+		t.Fatalf("response is not valid JSON: %v\nbody: %s", err, text)
+	}
+}
+
+// ─── reload_config handler ────────────────────────────────────────────────────
+
+func TestReloadConfig_ReturnsValidJSON(t *testing.T) {
+	r, err := reloadConfigHandler(context.Background(), callReq(nil))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	text := resultText(t, r)
+	var out struct {
+		Status  string `json:"status"`
+		Message string `json:"message"`
+		Config  any    `json:"config"`
+	}
+	if err := json.Unmarshal([]byte(text), &out); err != nil {
+		t.Fatalf("response is not valid JSON: %v\nbody: %s", err, text)
+	}
+	if out.Status != "ok" {
+		t.Errorf("status = %q, want ok", out.Status)
 	}
 }
 

@@ -6,6 +6,7 @@ package history
 import (
 	"bufio"
 	"encoding/json"
+	"log"
 	"os"
 	"path/filepath"
 	"sort"
@@ -187,6 +188,9 @@ func pruneOld() {
 
 	fi, err := os.Stat(histPath)
 	if err != nil {
+		if !os.IsNotExist(err) {
+			log.Printf("history: prune stat error: %v", err)
+		}
 		return
 	}
 
@@ -199,6 +203,7 @@ func pruneOld() {
 
 	f, err := os.Open(histPath)
 	if err != nil {
+		log.Printf("history: prune open error: %v", err)
 		return
 	}
 
@@ -219,6 +224,7 @@ func pruneOld() {
 	dir := filepath.Dir(histPath)
 	tmp, err := os.CreateTemp(dir, ".history-prune-*")
 	if err != nil {
+		log.Printf("history: prune create temp: %v", err)
 		return
 	}
 	w := bufio.NewWriter(tmp)
@@ -228,5 +234,8 @@ func pruneOld() {
 	}
 	w.Flush()
 	tmp.Close()
-	os.Rename(tmp.Name(), histPath)
+	if err := os.Rename(tmp.Name(), histPath); err != nil {
+		log.Printf("history: prune rename: %v", err)
+		os.Remove(tmp.Name())
+	}
 }

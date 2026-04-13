@@ -7,6 +7,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -17,6 +18,57 @@ import (
 	"github.com/ClementG91/MCP-FlowSentinel/internal/correlate"
 	"github.com/ClementG91/MCP-FlowSentinel/internal/history"
 )
+
+// ─── Runtime statistics ───────────────────────────────────────────────────────
+
+var (
+	running      atomic.Bool
+	windowsRun   atomic.Int64
+	flowsScored  atomic.Int64
+	windowErrors atomic.Int64
+
+	startTimeMu sync.RWMutex
+	startTime   time.Time
+	activeIface string
+)
+
+// Stats holds a snapshot of the daemon's runtime metrics.
+type Stats struct {
+	Running       bool      `json:"running"`
+	StartTime     time.Time `json:"start_time,omitempty"`
+	UptimeSec     int64     `json:"uptime_seconds,omitempty"`
+	Interface     string    `json:"interface,omitempty"`
+	IntervalSec   int       `json:"interval_seconds"`
+	WindowsRun    int64     `json:"windows_run"`
+	FlowsScored   int64     `json:"flows_scored"`
+	AlertsFired   int64     `json:"alerts_fired"`
+	WindowErrors  int64     `json:"window_errors"`
+}
+
+// GetStats returns a snapshot of the daemon's current runtime metrics.
+func GetStats() Stats {
+	startTimeMu.RLock()
+	st := startTime
+	iface := activeIface
+	startTimeMu.RUnlock()
+
+	s := Stats{
+		Running:      running.Load(),
+		Interface:    iface,
+		IntervalSec:  config.Get().Daemon.CaptureIntervalSec,
+		WindowsRun:   windowsRun.Load(),
+		FlowsScored:  flowsScored.Load(),
+		AlertsFired:  alerting.FiredCount(),
+		WindowErrors: windowErrors.Load(),
+	}
+	if !st.IsZero() {
+		s.StartTime = st
+		s.UptimeSec = int64(time.Since(st).Seconds())
+	}
+	return s
+}
+
+// ─── Daemon loop ──────────────────────────────────────────────────────────────
 
 // Run starts the daemon capture loop. It blocks until ctx is cancelled.
 // Each window is CaptureIntervalSec seconds; flows are appended to history
@@ -37,6 +89,13 @@ func Run(ctx context.Context) error {
 	interval := time.Duration(dcfg.CaptureIntervalSec) * time.Second
 	log.Printf("daemon: monitoring %q every %s", iface, interval)
 
+	running.Store(true)
+	startTimeMu.Lock()
+	startTime = time.Now()
+	activeIface = iface
+	startTimeMu.Unlock()
+	defer running.Store(false)
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -45,6 +104,7 @@ func Run(ctx context.Context) error {
 		}
 
 		if err := runWindow(ctx, iface, dcfg.BPFFilter, interval); err != nil {
+			windowErrors.Add(1)
 			log.Printf("daemon: window error: %v", err)
 		}
 	}
@@ -117,16 +177,19 @@ func runWindow(ctx context.Context, iface, bpfFilter string, dur time.Duration) 
 
 	flows := agg.Finalize(resolver)
 	if len(flows) == 0 {
+		windowsRun.Add(1)
 		return nil
 	}
+
+	flowsScored.Add(int64(len(flows)))
+	windowsRun.Add(1)
 
 	history.Append("daemon:"+iface, flows)
 	alerting.Fire(flows)
 
-	// Log a brief summary.
 	summary := aggregate.Summarise(flows)
-	log.Printf("daemon: window done — %d flows  high=%d medium=%d low=%d",
-		len(flows), summary.High, summary.Medium, summary.Low)
+	log.Printf("daemon: window done — %d flows  critical=%d high=%d medium=%d low=%d",
+		len(flows), summary.Critical, summary.High, summary.Medium, summary.Low)
 
 	return nil
 }
@@ -175,4 +238,3 @@ func hasFlag(flags []string, target string) bool {
 	}
 	return false
 }
-

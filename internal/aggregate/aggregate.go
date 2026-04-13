@@ -19,13 +19,19 @@ import (
 	"github.com/ClementG91/MCP-FlowSentinel/internal/ja3"
 )
 
-// dnsCacheTTL is how long a resolved (or negative) PTR result is reused.
-const dnsCacheTTL = 5 * time.Minute
-
 // dnsCache is the package-level reverse-DNS LRU cache, bounded at 10 000 entries.
 // Key: IP string → hostname string ("" for negative results).
-// Entries expire after dnsCacheTTL; the LRU evicts oldest entries at capacity.
+// Entries expire after getDNSCacheTTL(); the LRU evicts oldest entries at capacity.
 var dnsCache = cache.New[string, string](10_000)
+
+// getDNSCacheTTL returns the configured DNS cache TTL, falling back to 5 minutes.
+func getDNSCacheTTL() time.Duration {
+	ttl := config.Get().Capture.DNSCacheTTLSec
+	if ttl <= 0 {
+		return 5 * time.Minute
+	}
+	return time.Duration(ttl) * time.Second
+}
 
 // privateNetworks holds all RFC 1918, loopback, and link-local ranges
 // pre-parsed at init time for fast membership tests.
@@ -57,6 +63,22 @@ func isPrivateIP(ipStr string) bool {
 		}
 	}
 	return false
+}
+
+// dohProviders are well-known DNS-over-HTTPS provider hostnames.
+// Traffic to these on standard HTTPS ports may indicate DNS tunneling or
+// covert channel use by processes that have no business performing DoH.
+var dohProviders = map[string]bool{
+	"dns.google":                 true,
+	"cloudflare-dns.com":         true,
+	"1dot1dot1dot1.cloudflare-dns.com": true,
+	"dns.quad9.net":              true,
+	"dns9.quad9.net":             true,
+	"doh.opendns.com":            true,
+	"dns.nextdns.io":             true,
+	"doh.cleanbrowsing.org":      true,
+	"doh.xfinity.com":            true,
+	"mozilla.cloudflare-dns.com": true,
 }
 
 // ProcessSnapshot carries enriched process metadata from a single flow's owner.
@@ -110,7 +132,7 @@ type FlowRecord struct {
 	TLSSNIName  string   `json:"tls_sni,omitempty"`
 	DNSQueries  []string `json:"dns_queries,omitempty"`
 	// JA3 TLS fingerprinting
-	JA3Hash    string `json:"ja3_hash,omitempty"`    // MD5 of TLS ClientHello parameters
+	JA3Hash     string `json:"ja3_hash,omitempty"`     // MD5 of TLS ClientHello parameters
 	JA3KnownBad string `json:"ja3_known_bad,omitempty"` // malware family if hash matches known-bad list
 	// Analysis fields
 	SuspicionScore   float64  `json:"suspicion_score"`
@@ -258,14 +280,14 @@ func (a *Aggregator) Finalize(resolver ProcessResolver) []FlowRecord {
 		}
 		if resolver != nil {
 			if snap := resolver(rec.SrcIP, rec.SrcPort, rec.DstIP, rec.DstPort, rec.Protocol); snap != nil {
-				rec.PID         = snap.PID
+				rec.PID = snap.PID
 				rec.ProcessName = snap.Name
-				rec.BinaryPath  = snap.BinaryPath
-				rec.Cmdline     = snap.Cmdline
-				rec.ParentPID   = snap.ParentPID
-				rec.ParentName  = snap.ParentName
-				rec.Username    = snap.Username
-				rec.CreateTime  = snap.CreateTime
+				rec.BinaryPath = snap.BinaryPath
+				rec.Cmdline = snap.Cmdline
+				rec.ParentPID = snap.ParentPID
+				rec.ParentName = snap.ParentName
+				rec.Username = snap.Username
+				rec.CreateTime = snap.CreateTime
 			}
 		}
 		items = append(items, interim{rec: rec, key: key, timestamps: tsCopy})
@@ -286,7 +308,8 @@ func (a *Aggregator) Finalize(resolver ProcessResolver) []FlowRecord {
 	}
 	wg.Wait()
 
-	// ── Pass 2.5: GeoIP + JA3 known-bad enrichment (synchronous, cached) ───────
+	// ── Pass 2.5: GeoIP + JA3 known-bad enrichment (synchronous, cached) ─────
+	extraJA3 := config.Get().Scoring.ExtraJA3BadHashes
 	for i := range items {
 		if gi := intel.Lookup(items[i].rec.DstIP); gi != nil {
 			items[i].rec.Country = gi.CountryCode
@@ -294,7 +317,7 @@ func (a *Aggregator) Finalize(resolver ProcessResolver) []FlowRecord {
 			items[i].rec.GeoHighRisk = gi.IsHighRisk
 		}
 		if items[i].rec.JA3Hash != "" {
-			if family, ok := ja3.Lookup(items[i].rec.JA3Hash); ok {
+			if family, ok := ja3.LookupWithCustom(items[i].rec.JA3Hash, extraJA3); ok {
 				items[i].rec.JA3KnownBad = family
 			}
 		}
@@ -392,6 +415,21 @@ var suspiciousCmdlinePatterns = []*regexp.Regexp{
 	regexp.MustCompile(`/(?:tmp|dev/shm|var/tmp|run/shm)/`),
 }
 
+// isExemptedProcess reports whether the process name matches any exempted process
+// in the config. Comparison is case-insensitive.
+func isExemptedProcess(name string, exempted []string) bool {
+	if name == "" || len(exempted) == 0 {
+		return false
+	}
+	lower := strings.ToLower(name)
+	for _, ex := range exempted {
+		if strings.ToLower(ex) == lower {
+			return true
+		}
+	}
+	return false
+}
+
 func score(key FlowKey, rec FlowRecord, ts []time.Time) (float64, []string) {
 	cfg := config.Get().Scoring
 	var total float64
@@ -403,7 +441,6 @@ func score(key FlowKey, rec FlowRecord, ts []time.Time) (float64, []string) {
 	}
 
 	// ── Port analysis ───────────────────────────────────────────────────────
-	// Skip scoring for IANA dynamic/ephemeral ports (49152–65535).
 	if !cfg.DisablePortScoring {
 		effectiveBadPorts := knownBadPorts
 		if len(cfg.ExtraBadPorts) > 0 {
@@ -434,54 +471,72 @@ func score(key FlowKey, rec FlowRecord, ts []time.Time) (float64, []string) {
 		}
 	}
 
-	// ── DNS analysis ────────────────────────────────────────────────────────
-	// Skip the penalty for private/loopback IPs — they never have public PTR records.
-	if rec.ReverseDNS == "" && !isPrivateIP(rec.DstIP) {
-		add(0.8, "no reverse DNS — direct IP connection")
+	// ── Reverse DNS analysis ────────────────────────────────────────────────
+	if !cfg.DisableReverseDNSScoring {
+		if rec.ReverseDNS == "" && !isPrivateIP(rec.DstIP) {
+			add(0.8, "no reverse DNS — direct IP connection")
+		}
 	}
 
-	// DNS exfiltration: high-entropy subdomains indicate data encoding.
-	for _, q := range rec.DNSQueries {
-		if isHighEntropyDomain(q) {
-			add(2.5, fmt.Sprintf("possible DNS exfiltration: high-entropy query %q", q))
-			break // one penalty per flow
+	// ── DNS exfiltration ────────────────────────────────────────────────────
+	if !cfg.DisableDNSExfilScoring {
+		for _, q := range rec.DNSQueries {
+			if isHighEntropyDomain(q) {
+				add(2.5, fmt.Sprintf("possible DNS exfiltration: high-entropy query %q", q))
+				break // one penalty per flow
+			}
+		}
+	}
+
+	// ── TLS SNI analysis ────────────────────────────────────────────────────
+	if !cfg.DisableSNIScoring && key.Proto == "TCP" {
+		// Missing SNI on an encrypted port is suspicious: legitimate TLS
+		// clients always send SNI; C2 frameworks sometimes omit it.
+		if rec.TLSSNIName == "" && (key.DstPort == 443 || key.DstPort == 8443) && rec.PacketCount > 3 {
+			add(0.7, "TLS traffic on HTTPS port without SNI — potential evasion or non-standard TLS")
+		}
+		// Connection to a known DoH provider may indicate DNS tunneling or
+		// covert use of DNS-over-HTTPS by a non-browser process.
+		if rec.TLSSNIName != "" && dohProviders[strings.ToLower(rec.TLSSNIName)] {
+			add(0.5, fmt.Sprintf("connection to DNS-over-HTTPS provider: %s", rec.TLSSNIName))
 		}
 	}
 
 	// ── JA3 TLS fingerprint ─────────────────────────────────────────────────
-	if rec.JA3KnownBad != "" {
+	if !cfg.DisableJA3Scoring && rec.JA3KnownBad != "" {
 		add(4.0, fmt.Sprintf("JA3 fingerprint matches known malware: %s [%s]", rec.JA3KnownBad, rec.JA3Hash))
 	}
 
 	// ── GeoIP / threat intelligence ─────────────────────────────────────────
-	if rec.GeoHighRisk {
+	if !cfg.DisableGeoScoring && rec.GeoHighRisk {
 		add(1.5, fmt.Sprintf("destination in high-risk ASN: %s", rec.ASNOrg))
 	}
 
 	// ── Process / binary analysis ───────────────────────────────────────────
 	if !cfg.DisableBinaryPathScoring {
-		if rec.PID > 0 && rec.BinaryPath == "" {
-			add(1.0, "could not resolve binary path for PID")
-		}
-		effectivePaths := suspiciousPathPrefixes
-		if len(cfg.ExtraSuspiciousPaths) > 0 {
-			effectivePaths = append(effectivePaths, cfg.ExtraSuspiciousPaths...)
-		}
-		for _, prefix := range effectivePaths {
-			if strings.Contains(rec.BinaryPath, prefix) {
-				add(2.5, fmt.Sprintf("binary running from suspicious path: %s", rec.BinaryPath))
-				break
+		if !isExemptedProcess(rec.ProcessName, cfg.ExemptedProcesses) {
+			if rec.PID > 0 && rec.BinaryPath == "" {
+				add(1.0, "could not resolve binary path for PID")
+			}
+			effectivePaths := suspiciousPathPrefixes
+			if len(cfg.ExtraSuspiciousPaths) > 0 {
+				effectivePaths = append(effectivePaths, cfg.ExtraSuspiciousPaths...)
+			}
+			for _, prefix := range effectivePaths {
+				if strings.Contains(rec.BinaryPath, prefix) {
+					add(2.5, fmt.Sprintf("binary running from suspicious path: %s", rec.BinaryPath))
+					break
+				}
 			}
 		}
 	}
 
 	// ── Cmdline analysis ────────────────────────────────────────────────────
 	if !cfg.DisableCmdlineScoring && rec.Cmdline != "" {
+		// Use pre-compiled patterns (compiled once at config load, not per-flow).
 		effectivePatterns := suspiciousCmdlinePatterns
-		for _, pat := range cfg.ExtraCmdlinePatterns {
-			if re, err := regexp.Compile(pat); err == nil {
-				effectivePatterns = append(effectivePatterns, re)
-			}
+		if len(cfg.CompiledExtraCmdlinePatterns) > 0 {
+			effectivePatterns = append(effectivePatterns, cfg.CompiledExtraCmdlinePatterns...)
 		}
 		for _, re := range effectivePatterns {
 			if re.MatchString(rec.Cmdline) {
@@ -492,13 +547,33 @@ func score(key FlowKey, rec FlowRecord, ts []time.Time) (float64, []string) {
 	}
 
 	// ── Beaconing detection ─────────────────────────────────────────────────
-	if bs, reason := beaconingScore(ts, cfg); bs > 0 {
-		add(bs, reason)
+	if !cfg.DisableBeaconingScoring && !isExemptedProcess(rec.ProcessName, cfg.ExemptedProcesses) {
+		if bs, reason := beaconingScore(ts, cfg); bs > 0 {
+			add(bs, reason)
+		}
 	}
 
 	// ── High data volume ────────────────────────────────────────────────────
 	if rec.ByteCount > 5*1024*1024 {
 		add(0.5, fmt.Sprintf("high data transfer: %.1f MB", float64(rec.ByteCount)/1024/1024))
+	}
+
+	// ── High transfer rate (potential rapid exfiltration) ───────────────────
+	// Only score when duration is meaningful (> 1 s) and data volume is significant.
+	if rec.DurationMs > 1000 && rec.ByteCount > 2*1024*1024 {
+		bps := float64(rec.ByteCount) / (float64(rec.DurationMs) / 1000.0)
+		if bps > 20*1024*1024 { // > 20 MB/s sustained outbound
+			add(1.0, fmt.Sprintf("very high transfer rate: %.0f MB/s — potential rapid exfiltration", bps/1024/1024))
+		}
+	}
+
+	// ── Long-lived connection ────────────────────────────────────────────────
+	// A connection open for > 10 minutes with regular traffic is a strong C2
+	// indicator when combined with other signals.
+	const longLivedMs = 10 * 60 * 1000 // 10 min
+	if rec.DurationMs > longLivedMs && len(ts) >= cfg.BeaconingMinPackets {
+		minutes := float64(rec.DurationMs) / 60000.0
+		add(0.5, fmt.Sprintf("long-lived connection: %.0f minutes with %d packets", minutes, len(ts)))
 	}
 
 	if total > 10.0 {
@@ -566,11 +641,11 @@ func lookupReverseDNS(ip string) string {
 		return hostname
 	}
 	hostname := doLookupReverseDNS(ip)
-	dnsCache.Set(ip, hostname, dnsCacheTTL)
+	dnsCache.Set(ip, hostname, getDNSCacheTTL())
 	return hostname
 }
 
-// doLookupReverseDNS performs the actual PTR query with a 200 ms deadline.
+// doLookupReverseDNS performs the actual PTR query with a configured deadline.
 func doLookupReverseDNS(ip string) string {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(config.Get().Capture.DNSTimeoutMS)*time.Millisecond)
 	defer cancel()
@@ -604,9 +679,7 @@ func shannonEntropy(s string) float64 {
 
 // isHighEntropyDomain returns true when any subdomain label of fqdn looks
 // like base64/hex-encoded data, which is a key indicator of DNS exfiltration.
-// Thresholds: entropy > 3.5 bits/char OR label length > 40 chars.
 func isHighEntropyDomain(fqdn string) bool {
-	// Strip trailing dot if present.
 	fqdn = strings.TrimSuffix(fqdn, ".")
 	parts := strings.Split(fqdn, ".")
 	// Ignore the public-suffix (TLD + registrable label).

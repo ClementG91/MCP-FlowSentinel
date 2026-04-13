@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sync"
 
 	"gopkg.in/yaml.v3"
@@ -46,15 +47,35 @@ type ScoringConfig struct {
 	ExtraBadPorts      []int `yaml:"extra_bad_ports"`
 	ExtraStandardPorts []int `yaml:"extra_standard_ports"`
 
-	// Additive path / cmdline / ASN lists
-	ExtraSuspiciousPaths   []string `yaml:"extra_suspicious_paths"`
-	ExtraCmdlinePatterns   []string `yaml:"extra_cmdline_patterns"`
-	ExtraHighRiskASNs      []string `yaml:"extra_high_risk_asns"`
+	// Additive path / cmdline / ASN / JA3 lists
+	ExtraSuspiciousPaths []string `yaml:"extra_suspicious_paths"`
+	ExtraCmdlinePatterns []string `yaml:"extra_cmdline_patterns"`
+	ExtraHighRiskASNs    []string `yaml:"extra_high_risk_asns"`
+	// ExtraJA3BadHashes adds custom malware JA3 fingerprints.
+	// Format: "hash" (description defaults to "custom threat indicator")
+	// or "hash:description" (e.g. "abc123:My internal red-team tool").
+	ExtraJA3BadHashes []string `yaml:"extra_ja3_bad_hashes"`
 
-	// Kill-switches for noisy signals
+	// ExemptedProcesses lists process names that bypass beaconing and
+	// binary-path scoring. Useful for build systems, cron jobs, and
+	// monitoring agents that exhibit beacon-like traffic patterns.
+	ExemptedProcesses []string `yaml:"exempted_processes"`
+
+	// Kill-switches — set to true to silence a noisy signal entirely.
 	DisableBinaryPathScoring bool `yaml:"disable_binary_path_scoring"`
 	DisableCmdlineScoring    bool `yaml:"disable_cmdline_scoring"`
 	DisablePortScoring       bool `yaml:"disable_port_scoring"`
+	DisableBeaconingScoring  bool `yaml:"disable_beaconing_scoring"`
+	DisableDNSExfilScoring   bool `yaml:"disable_dns_exfil_scoring"`
+	DisableGeoScoring        bool `yaml:"disable_geo_scoring"`
+	DisableJA3Scoring        bool `yaml:"disable_ja3_scoring"`
+	DisableReverseDNSScoring bool `yaml:"disable_reverse_dns_scoring"`
+	DisableSNIScoring        bool `yaml:"disable_sni_scoring"`
+
+	// CompiledExtraCmdlinePatterns holds compiled versions of ExtraCmdlinePatterns.
+	// Populated automatically after config load. Not serialized — use this
+	// instead of ExtraCmdlinePatterns in hot paths to avoid per-flow compilation.
+	CompiledExtraCmdlinePatterns []*regexp.Regexp `yaml:"-"`
 }
 
 // CaptureConfig controls packet-capture timing parameters.
@@ -63,6 +84,9 @@ type CaptureConfig struct {
 	MaxDurationSec     int `yaml:"max_duration_seconds"`
 	DNSTimeoutMS       int `yaml:"dns_timeout_ms"`
 	DNSWorkers         int `yaml:"dns_workers"`
+	// DNSCacheTTLSec is how long resolved (or negative) PTR results are reused.
+	// 0 means use the built-in default (300 s). Takes effect on next restart.
+	DNSCacheTTLSec int `yaml:"dns_cache_ttl_seconds"`
 }
 
 // GeoIPConfig points to MaxMind database files.
@@ -84,6 +108,9 @@ type AlertingConfig struct {
 	Enabled           bool    `yaml:"enabled"`
 	WebhookURL        string  `yaml:"webhook_url"`
 	MinScoreThreshold float64 `yaml:"min_score_threshold"`
+	// DeduplicationWindowSec suppresses repeat alerts for the same flow within
+	// this window. 0 means use the built-in default (300 s).
+	DeduplicationWindowSec int `yaml:"deduplication_window_seconds"`
 }
 
 // DaemonConfig controls the --daemon continuous-monitoring mode.
@@ -98,7 +125,7 @@ type DaemonConfig struct {
 // Default returns a Config populated with the built-in defaults.
 // These match the values that were previously hard-coded throughout the codebase.
 func Default() *Config {
-	return &Config{
+	cfg := &Config{
 		Scoring: ScoringConfig{
 			BeaconingStrongCV:    0.15,
 			BeaconingPossibleCV:  0.30,
@@ -121,19 +148,24 @@ func Default() *Config {
 			PruneToHours: 12,
 		},
 		Alerting: AlertingConfig{
-			MinScoreThreshold: 7.0,
+			MinScoreThreshold:      7.0,
+			DeduplicationWindowSec: 300,
 		},
 		Daemon: DaemonConfig{
 			CaptureIntervalSec: 300,
 		},
 	}
+	compileScoringPatterns(cfg)
+	return cfg
 }
 
 // ─── Global singleton ─────────────────────────────────────────────────────────
 
 var (
-	global *Config
-	mu     sync.RWMutex
+	global     *Config
+	globalMu   sync.RWMutex
+	lastPath   string
+	lastPathMu sync.RWMutex
 )
 
 func init() {
@@ -143,16 +175,30 @@ func init() {
 // Get returns the active global config. Always non-nil (returns defaults if
 // Load has not been called).
 func Get() *Config {
-	mu.RLock()
-	defer mu.RUnlock()
+	globalMu.RLock()
+	defer globalMu.RUnlock()
 	return global
 }
 
 // Set replaces the global config. Used by Load and by tests.
 func Set(c *Config) {
-	mu.Lock()
+	globalMu.Lock()
 	global = c
-	mu.Unlock()
+	globalMu.Unlock()
+}
+
+// LoadedPath returns the config file path that was last successfully loaded.
+// Empty string means no file was loaded (built-in defaults are in use).
+func LoadedPath() string {
+	lastPathMu.RLock()
+	defer lastPathMu.RUnlock()
+	return lastPath
+}
+
+// Reload re-reads the config from the last loaded path (or DefaultPath if no
+// file was previously loaded). Useful for hot-reloading without restart.
+func Reload() (*Config, error) {
+	return Load(LoadedPath())
 }
 
 // ─── Loading ──────────────────────────────────────────────────────────────────
@@ -199,9 +245,27 @@ func Load(path string) (*Config, error) {
 		return nil, fmt.Errorf("invalid config %s: %w", path, err)
 	}
 
+	compileScoringPatterns(cfg)
 	applyEnvOverrides(cfg)
 	Set(cfg)
+
+	lastPathMu.Lock()
+	lastPath = path
+	lastPathMu.Unlock()
+
 	return cfg, nil
+}
+
+// compileScoringPatterns pre-compiles ExtraCmdlinePatterns into
+// CompiledExtraCmdlinePatterns to avoid per-flow regex compilation in hot paths.
+// Invalid patterns are silently skipped (they will be ignored at runtime).
+func compileScoringPatterns(cfg *Config) {
+	cfg.Scoring.CompiledExtraCmdlinePatterns = nil
+	for _, pat := range cfg.Scoring.ExtraCmdlinePatterns {
+		if re, err := regexp.Compile(pat); err == nil {
+			cfg.Scoring.CompiledExtraCmdlinePatterns = append(cfg.Scoring.CompiledExtraCmdlinePatterns, re)
+		}
+	}
 }
 
 // applyEnvOverrides enforces that environment variables always win over the
@@ -259,6 +323,10 @@ func validate(cfg *Config) error {
 	if cfg.Daemon.CaptureIntervalSec <= 0 {
 		return fmt.Errorf("daemon.capture_interval_seconds must be > 0, got %d", cfg.Daemon.CaptureIntervalSec)
 	}
+	a := cfg.Alerting
+	if a.MinScoreThreshold < 0 || a.MinScoreThreshold > 10 {
+		return fmt.Errorf("alerting.min_score_threshold must be in [0, 10], got %v", a.MinScoreThreshold)
+	}
 	return nil
 }
 
@@ -287,7 +355,8 @@ const defaultYAML = `# MCP-FlowSentinel — Configuration File
 # ─── Detection Engine ─────────────────────────────────────────────────────────
 scoring:
   # Beaconing — coefficient of variation (CV) of inter-packet arrival times.
-  # Lower threshold = stricter detection (fewer false positives, may miss jitter).
+  # IMPORTANT: lower CV threshold = stricter detection (higher CV = more jitter allowed).
+  # Raising these values makes detection LESS strict (more false positives suppressed).
   beaconing_strong_cv: 0.15     # CV < this → strong beaconing   (+3.5 pts)
   beaconing_possible_cv: 0.30   # CV < this → possible beaconing  (+2.0 pts)
   beaconing_min_packets: 5      # Minimum packets required for statistical validity
@@ -322,12 +391,37 @@ scoring:
   # extra_high_risk_asns:
   #   - "my-bad-hoster"
 
+  # ── Custom JA3 bad hashes (additive) ────────────────────────────────────
+  # Format: "hash" or "hash:description"
+  # extra_ja3_bad_hashes:
+  #   - "abc123def456abc123def456abc123de:My red-team tool"
+  #   - "deadbeef00112233deadbeef00112233"
+
+  # ── Process exemptions (skip beaconing + binary-path scoring) ─────────────
+  # Useful for cron jobs, monitoring agents, build systems.
+  # exempted_processes:
+  #   - "prometheus"
+  #   - "node_exporter"
+  #   - "datadog-agent"
+
   # ── Kill-switches — set true to silence noisy signals ─────────────────────
   # Useful if /tmp is normal in your environment (build systems, containers).
   disable_binary_path_scoring: false
   disable_cmdline_scoring: false
   # Useful if your app uses non-standard ports legitimately.
   disable_port_scoring: false
+  # Disable beaconing detection (noisy on environments with regular heartbeats).
+  disable_beaconing_scoring: false
+  # Disable DNS exfiltration detection.
+  disable_dns_exfil_scoring: false
+  # Disable GeoIP / ASN high-risk scoring.
+  disable_geo_scoring: false
+  # Disable JA3 TLS fingerprint matching.
+  disable_ja3_scoring: false
+  # Disable reverse-DNS absence penalty.
+  disable_reverse_dns_scoring: false
+  # Disable TLS SNI analysis (missing SNI, DoH providers).
+  disable_sni_scoring: false
 
 # ─── Capture Timing ───────────────────────────────────────────────────────────
 capture:
@@ -335,6 +429,7 @@ capture:
   max_duration_seconds: 60       # Hard cap enforced by analyze_network
   dns_timeout_ms: 200            # Per-IP reverse-DNS lookup timeout
   dns_workers: 20                # Concurrent goroutines for reverse-DNS resolution
+  dns_cache_ttl_seconds: 300     # How long PTR results are cached (takes effect on restart)
 
 # ─── GeoIP Enrichment (optional) ─────────────────────────────────────────────
 # Download free databases from https://dev.maxmind.com/geoip/geolite2-free-geolocation-data
@@ -355,7 +450,8 @@ history:
 alerting:
   enabled: false
   # webhook_url: "https://hooks.slack.com/services/T.../B.../..."
-  min_score_threshold: 7.0    # Only alert on CRITICAL flows (score >= 7.0)
+  min_score_threshold: 7.0              # Only alert on CRITICAL flows (score >= 7.0)
+  deduplication_window_seconds: 300     # Suppress repeat alerts for the same flow within this window
 
 # ─── Daemon Mode ──────────────────────────────────────────────────────────────
 # Used when running: mcp-flowsentinel --daemon

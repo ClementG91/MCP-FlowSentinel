@@ -84,6 +84,32 @@ func Lookup(hash string) (string, bool) {
 	return desc, ok
 }
 
+// LookupWithCustom checks the hash against the built-in known-bad list and
+// any custom hashes supplied by the caller (from config.ScoringConfig.ExtraJA3BadHashes).
+//
+// Each entry in extraHashes must be either:
+//   - "hash"              → description defaults to "custom threat indicator"
+//   - "hash:description"  → uses the provided description
+func LookupWithCustom(hash string, extraHashes []string) (string, bool) {
+	if desc, ok := Lookup(hash); ok {
+		return desc, true
+	}
+	if len(extraHashes) == 0 || hash == "" {
+		return "", false
+	}
+	normalized := strings.ToLower(hash)
+	for _, entry := range extraHashes {
+		parts := strings.SplitN(entry, ":", 2)
+		if strings.ToLower(strings.TrimSpace(parts[0])) == normalized {
+			if len(parts) > 1 && parts[1] != "" {
+				return parts[1], true
+			}
+			return "custom threat indicator", true
+		}
+	}
+	return "", false
+}
+
 // clientHello holds the parsed fields required for JA3 computation.
 type clientHello struct {
 	version            uint16

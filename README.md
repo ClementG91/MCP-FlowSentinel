@@ -220,6 +220,10 @@ The binary writes logs to **stderr** only; **stdout** is reserved for the MCP JS
 | `get_process_map` | Snapshot of all processes with open sockets |
 | `get_flow_history` | Query the rolling 24-hour history of past capture sessions |
 | `analyze_process` | Deep-dive on a specific process: open connections, parent chain, GeoIP, history |
+| `get_config` | Return the current runtime configuration (webhook URL masked) |
+| `get_daemon_stats` | Return runtime statistics for the background daemon |
+| `get_alerts` | Query the persistent alert log for fired webhook alerts |
+| `reload_config` | Hot-reload the YAML config file without restarting the server |
 
 `analyze_network` and `analyze_pcap` accept optional filters:
 - `min_score` (0–10) — only return flows at or above this suspicion score
@@ -229,6 +233,8 @@ The binary writes logs to **stderr** only; **stdout** is reserved for the MCP JS
 `get_flow_history` filters: `max_age_hours`, `min_score`, `src_ip`, `dst_ip`, `process_name`, `top_n`
 
 `analyze_process` accepts `pid` and/or `process_name` (case-insensitive substring match).
+
+`get_alerts` filters: `max_age_hours`, `min_score`, `top_n`. Reads `~/.cache/mcp-flowsentinel/alerts.jsonl`.
 
 ---
 
@@ -252,6 +258,10 @@ Each flow is scored 0–10 based on multiple signals:
 | Port scan — confirmed (≥ 20 unique destinations) | +3.0 | Active network scan |
 | Port scan — possible (≥ 8 unique destinations) | +1.5 | Possible scan activity |
 | Large transfer (> 5 MB) | +0.5 | Bulk exfiltration indicator |
+| **Missing TLS SNI on HTTPS port 443** | **+0.7** | **Stealthy TLS client avoids hostname negotiation** |
+| **DNS-over-HTTPS provider (Cloudflare, Google, etc.)** | **+0.5** | **DNS tunnelling / resolver bypass** |
+| **High transfer rate (> 20 MB/s sustained)** | **+1.0** | **Rapid local exfiltration or C2 channel** |
+| **Long-lived connection (> 10 min with traffic)** | **+0.5** | **Persistent C2 keepalive or data tap** |
 
 Private/loopback/link-local IPs (RFC 1918, `127.x`, `169.254.x`, IPv6 private ranges) are never penalised for missing PTR records.
 
@@ -365,9 +375,17 @@ scoring:
     - "(?i)mshta\\.exe"
   extra_high_risk_asns:
     - "my-bad-hoster"
+  # Custom JA3 bad hashes (format: "hash" or "hash:description"):
+  extra_ja3_bad_hashes:
+    - "abc123def456abc123def456abc123de:My red-team tool"
+  # Process exemptions — skip beaconing + binary-path scoring for these names:
+  exempted_processes:
+    - "prometheus"
+    - "datadog-agent"
   # Kill-switches for noisy signals (set true to disable):
   disable_binary_path_scoring: false  # useful in containers/build systems
   disable_port_scoring: false         # useful if your app uses non-standard ports
+  disable_sni_scoring: false          # disable missing-SNI and DoH detection
 
 # ─── Capture Timing ──────────────────────────────────────────────────────
 capture:
@@ -375,6 +393,7 @@ capture:
   max_duration_seconds: 60
   dns_timeout_ms: 200
   dns_workers: 20
+  dns_cache_ttl_seconds: 300   # PTR result cache TTL (restart required)
 
 # ─── GeoIP (paths can also be set via GEOIP_CITY_DB / GEOIP_ASN_DB env vars) ─
 geoip:
@@ -385,7 +404,8 @@ geoip:
 alerting:
   enabled: true
   webhook_url: "https://hooks.slack.com/services/T.../B.../..."  # or Discord/generic HTTP
-  min_score_threshold: 7.0  # only alert on CRITICAL flows
+  min_score_threshold: 7.0              # only alert on CRITICAL flows
+  deduplication_window_seconds: 300     # suppress repeat alerts within this window
 
 # ─── Daemon Mode ─────────────────────────────────────────────────────────
 daemon:
@@ -436,6 +456,7 @@ The request body:
 {
   "source": "mcp-flowsentinel",
   "timestamp": "2025-04-12T14:23:01Z",
+  "severity": "CRITICAL",
   "flow": { ... FlowRecord ... }
 }
 ```
@@ -446,6 +467,21 @@ Set the URL via environment variable to keep it out of the config file:
 
 ```bash
 FLOWSENTINEL_WEBHOOK_URL=https://hooks.slack.com/... mcp-flowsentinel --daemon
+```
+
+**Deduplication:** the same flow (identified by `src:port→dst:port/proto`) will not fire more than once per deduplication window (default: 5 minutes). Configurable:
+
+```yaml
+alerting:
+  deduplication_window_seconds: 300  # suppress repeat alerts within this window
+```
+
+**Alert log:** every fired alert is persisted to `~/.cache/mcp-flowsentinel/alerts.jsonl`. Query it at any time via the `get_alerts` MCP tool, or ask your AI: *"Show me all critical alerts from the last hour."*
+
+**Test your webhook:**
+
+```bash
+mcp-flowsentinel --config /path/to/config.yaml --test-alert
 ```
 
 ---
@@ -481,6 +517,8 @@ history:
 | `mcp-flowsentinel --init-config` | Write a default `config.yaml` to `~/.config/mcp-flowsentinel/config.yaml` |
 | `mcp-flowsentinel --init-config /path` | Write default config to a custom path |
 | `mcp-flowsentinel --config /path` | Load config from a specific path |
+| `mcp-flowsentinel --validate-config` | Validate the loaded config and print a summary, then exit |
+| `mcp-flowsentinel --test-alert` | Send a test webhook alert to verify alerting connectivity, then exit |
 | `mcp-flowsentinel --update` | Self-update to the latest GitHub release |
 | `mcp-flowsentinel --version` | Print version and exit |
 
@@ -529,8 +567,9 @@ internal/
   intel/      intel.go           GeoIP + threat-intel enrichment (MaxMind GeoLite2, cached)
   ja3/        ja3.go             JA3 TLS fingerprinting + known-bad hash lookup
   history/    history.go         Rolling JSONL persistence (~/.cache/mcp-flowsentinel/)
-  alerting/   alerting.go        Webhook notifications for high-score flows
-  daemon/     daemon.go          Continuous background capture loop
+  alerting/   alerting.go        Webhook notifications with deduplication + FiredCount
+              store.go           Persistent alert log (JSONL) + GetAlerts query
+  daemon/     daemon.go          Continuous background capture loop + GetStats counters
   updater/    updater.go         Self-update from GitHub Releases
   cache/      lru.go             Generic bounded LRU cache (DNS, etc.)
   tools/      register.go        MCP tool registration
@@ -540,6 +579,10 @@ internal/
               get_flow_history.go flow history query tool
               list_interfaces.go interface listing tool
               process_map.go     process map tool
+              get_config.go      runtime config inspection tool (webhook masked)
+              get_daemon_stats.go daemon runtime statistics tool
+              get_alerts.go      alert log query tool
+              reload_config.go   hot-reload config without restart tool
 ```
 
 **Data flow:**
