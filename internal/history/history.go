@@ -39,10 +39,21 @@ type QueryOpts struct {
 	TopN        int           // 0 → unlimited
 }
 
+// indexEntry maps a JSONL line's timestamp to its byte offset in histPath.
+// The slice is kept sorted by Timestamp ascending so binary search can find
+// the start offset for any time-range query in O(log n).
+type indexEntry struct {
+	ts     time.Time
+	offset int64
+}
+
 var (
 	mu          sync.Mutex
 	histPath    string
 	appendCount int64
+	// offsetIndex is an in-memory index over the history JSONL file.
+	// Protected by mu. Populated lazily on first Query and updated on Append.
+	offsetIndex []indexEntry
 )
 
 func init() {
@@ -84,8 +95,12 @@ func Append(source string, flows []aggregate.FlowRecord) {
 		mu.Unlock()
 		return
 	}
+	// Record the offset of the new line before writing.
+	offset, _ := f.Seek(0, 2) // seek to end = current file size
 	f.WriteString(string(data) + "\n")
 	f.Close()
+	// Append to in-memory index (always sorted: new entries have the latest ts).
+	offsetIndex = append(offsetIndex, indexEntry{ts: entry.Timestamp, offset: offset})
 	mu.Unlock()
 
 	// Prune old entries periodically to prevent unbounded file growth.
@@ -95,6 +110,9 @@ func Append(source string, flows []aggregate.FlowRecord) {
 }
 
 // Query reads the history file and returns entries that match opts.
+// When the in-memory offset index is populated it seeks directly to the
+// first entry that could fall within the requested time window, skipping
+// any earlier bytes entirely (O(log n) seek vs O(n) full scan).
 func Query(opts QueryOpts) ([]Entry, error) {
 	if opts.MaxAge <= 0 {
 		opts.MaxAge = time.Duration(config.Get().History.MaxAgeHours) * time.Hour
@@ -112,6 +130,32 @@ func Query(opts QueryOpts) ([]Entry, error) {
 		return nil, err
 	}
 	defer f.Close()
+
+	// If the index is empty (e.g. after a restart or prune) rebuild it from
+	// the file so subsequent queries benefit from O(log n) seeks.
+	if len(offsetIndex) == 0 {
+		buildIndex(f) // ignore error — fall back to full scan
+	}
+
+	// Binary-search the index for the first entry whose timestamp >= cutoff.
+	// Step back one entry as a safety margin for timestamp precision.
+	startOffset := int64(0)
+	if n := len(offsetIndex); n > 0 {
+		lo, hi := 0, n
+		for lo < hi {
+			mid := (lo + hi) / 2
+			if offsetIndex[mid].ts.Before(cutoff) {
+				lo = mid + 1
+			} else {
+				hi = mid
+			}
+		}
+		if lo > 0 {
+			startOffset = offsetIndex[lo-1].offset
+		}
+	}
+	// Always seek explicitly: buildIndex leaves the cursor at EOF.
+	f.Seek(startOffset, 0)
 
 	var results []Entry
 	scanner := bufio.NewScanner(f)
@@ -136,6 +180,28 @@ func Query(opts QueryOpts) ([]Entry, error) {
 	}
 
 	return results, scanner.Err()
+}
+
+// buildIndex rebuilds the offsetIndex by scanning through the open history file.
+// The file position is reset to 0 before scanning and left at EOF after.
+// Must be called with mu held.
+func buildIndex(f *os.File) error {
+	if _, err := f.Seek(0, 0); err != nil {
+		return err
+	}
+	offsetIndex = offsetIndex[:0]
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 4*1024*1024), 4*1024*1024)
+	var offset int64
+	for scanner.Scan() {
+		line := scanner.Bytes()
+		var entry Entry
+		if err := json.Unmarshal(line, &entry); err == nil {
+			offsetIndex = append(offsetIndex, indexEntry{ts: entry.Timestamp, offset: offset})
+		}
+		offset += int64(len(line)) + 1 // +1 for the '\n'
+	}
+	return scanner.Err()
 }
 
 // Path returns the absolute path of the history file for diagnostics.
@@ -171,13 +237,14 @@ func filterFlows(flows []aggregate.FlowRecord, opts QueryOpts) []aggregate.FlowR
 	return out
 }
 
-// SetPathForTesting overrides the history file path.
+// SetPathForTesting overrides the history file path and resets all state.
 // Must only be called from tests — not safe for concurrent use with Append/Query.
 func SetPathForTesting(path string) {
 	mu.Lock()
 	defer mu.Unlock()
 	histPath = path
 	atomic.StoreInt64(&appendCount, 0)
+	offsetIndex = offsetIndex[:0]
 }
 
 // pruneOld rewrites the history file removing entries older than maxAge.
@@ -237,5 +304,9 @@ func pruneOld() {
 	if err := os.Rename(tmp.Name(), histPath); err != nil {
 		log.Printf("history: prune rename: %v", err)
 		os.Remove(tmp.Name())
+		return
 	}
+	// The file has been rewritten — invalidate the offset index so the next
+	// Query rebuilds it from the new file.
+	offsetIndex = offsetIndex[:0]
 }

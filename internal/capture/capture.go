@@ -4,7 +4,9 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log"
 	"net"
+	"sync/atomic"
 	"time"
 
 	"github.com/ClementG91/MCP-FlowSentinel/internal/ja3"
@@ -12,6 +14,14 @@ import (
 	"github.com/google/gopacket/layers"
 	"github.com/google/gopacket/pcap"
 )
+
+// droppedPackets counts OS-level dropped packets reported by pcap since startup.
+var droppedPackets atomic.Uint64
+
+// DroppedPackets returns the cumulative number of packets dropped by the kernel
+// pcap ring buffer since the first live capture was started. A non-zero value
+// means the capture interface is saturated and flows may be incomplete.
+func DroppedPackets() uint64 { return droppedPackets.Load() }
 
 // PacketEvent is emitted for each decoded packet of interest.
 type PacketEvent struct {
@@ -53,6 +63,7 @@ func CapturePackets(ctx context.Context, iface, bpfFilter string) (<-chan Packet
 // drainPackets is the shared packet-reading loop for both live and offline sources.
 // When exitOnEOF is true (offline mode) the goroutine returns on io.EOF;
 // otherwise errors (e.g. pcap read timeouts in live mode) are retried.
+// In live mode, pcap Stats() are sampled every 5 seconds to detect kernel drops.
 func drainPackets(ctx context.Context, handle *pcap.Handle, ch chan<- PacketEvent, exitOnEOF bool) {
 	defer close(ch)
 	defer handle.Close()
@@ -60,10 +71,26 @@ func drainPackets(ctx context.Context, handle *pcap.Handle, ch chan<- PacketEven
 	src := gopacket.NewPacketSource(handle, handle.LinkType())
 	src.NoCopy = true
 
+	// Tick for periodic drop-counter sampling (live captures only).
+	var statsTicker <-chan time.Time
+	if !exitOnEOF {
+		t := time.NewTicker(5 * time.Second)
+		defer t.Stop()
+		statsTicker = t.C
+	}
+
 	for {
 		select {
 		case <-ctx.Done():
 			return
+		case <-statsTicker:
+			if stats, err := handle.Stats(); err == nil {
+				prev := droppedPackets.Swap(uint64(stats.PacketsDropped))
+				if uint64(stats.PacketsDropped) > prev {
+					log.Printf("capture: kernel dropped %d packets (total %d) — consider reducing capture load or increasing buffer",
+						uint64(stats.PacketsDropped)-prev, stats.PacketsDropped)
+				}
+			}
 		default:
 		}
 

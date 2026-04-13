@@ -370,6 +370,54 @@ func TestGetAlerts_NoFile_ReturnsEmpty(t *testing.T) {
 	}
 }
 
+// TestWebhookRetry_EventualSuccess verifies that a transient failure followed
+// by a success is handled correctly (no webhookFailures increment).
+func TestWebhookRetry_EventualSuccess(t *testing.T) {
+	attempt := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempt++
+		if attempt < 2 {
+			w.WriteHeader(500) // fail first attempt
+			return
+		}
+		w.WriteHeader(200) // succeed on second attempt
+	}))
+	defer srv.Close()
+
+	original := config.Get()
+	defer config.Set(original)
+	ResetDedupForTesting()
+
+	cfg := config.Default()
+	cfg.Alerting.Enabled = true
+	cfg.Alerting.WebhookURL = srv.URL
+	cfg.Alerting.MinScoreThreshold = 5.0
+	cfg.Alerting.DeduplicationWindowSec = 1
+	config.Set(cfg)
+
+	failsBefore := WebhookFailures()
+	firedBefore := FiredCount()
+	flow := aggregate.FlowRecord{SrcIP: "10.1.1.1", DstIP: "2.3.4.5", SrcPort: 9001, DstPort: 443, Protocol: "TCP", SuspicionScore: 9.0}
+	Fire([]aggregate.FlowRecord{flow})
+
+	// Wait long enough for one retry (1s back-off) + margin.
+	deadline := time.After(4 * time.Second)
+	for {
+		select {
+		case <-deadline:
+			t.Fatalf("webhook not fired within 4s; attempt=%d firedCount=%d", attempt, FiredCount())
+		case <-time.After(100 * time.Millisecond):
+			if FiredCount() > firedBefore {
+				// Success path taken.
+				if WebhookFailures() != failsBefore {
+					t.Errorf("webhookFailures incremented on eventual success")
+				}
+				return
+			}
+		}
+	}
+}
+
 func TestFire_EnvVarWebhook_Overrides(t *testing.T) {
 	received := make(chan struct{}, 1)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

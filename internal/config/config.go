@@ -31,9 +31,15 @@ type Config struct {
 // ScoringConfig controls every detection-engine threshold.
 type ScoringConfig struct {
 	// Beaconing
-	BeaconingStrongCV   float64 `yaml:"beaconing_strong_cv"`
-	BeaconingPossibleCV float64 `yaml:"beaconing_possible_cv"`
-	BeaconingMinPackets int     `yaml:"beaconing_min_packets"`
+	BeaconingStrongCV    float64 `yaml:"beaconing_strong_cv"`
+	BeaconingPossibleCV  float64 `yaml:"beaconing_possible_cv"`
+	BeaconingMinPackets  int     `yaml:"beaconing_min_packets"`
+	// BeaconingMinIntervalSec suppresses beaconing detection for flows whose
+	// mean inter-packet interval is shorter than this threshold (seconds).
+	// Useful to silence sub-100ms polling loops (NTP, MQTT) that have low CV
+	// but are obviously not C2. Set to 0 to disable the guard entirely.
+	// Default: 0 (disabled — score all intervals).
+	BeaconingMinIntervalSec float64 `yaml:"beaconing_min_interval_seconds"`
 
 	// DNS exfiltration
 	DNSEntropyThreshold  float64 `yaml:"dns_entropy_threshold"`
@@ -127,9 +133,10 @@ type DaemonConfig struct {
 func Default() *Config {
 	cfg := &Config{
 		Scoring: ScoringConfig{
-			BeaconingStrongCV:    0.15,
-			BeaconingPossibleCV:  0.30,
-			BeaconingMinPackets:  5,
+			BeaconingStrongCV:       0.15,
+			BeaconingPossibleCV:     0.30,
+			BeaconingMinPackets:     5,
+			BeaconingMinIntervalSec: 0, // disabled by default; set > 0 to filter sub-N-second intervals
 			DNSEntropyThreshold:  3.5,
 			DNSLabelLenThreshold: 40,
 			ScanConfirmedDests:   20,
@@ -155,7 +162,8 @@ func Default() *Config {
 			CaptureIntervalSec: 300,
 		},
 	}
-	compileScoringPatterns(cfg)
+	// Default() is called with empty ExtraCmdlinePatterns so this never errors.
+	_ = compileScoringPatterns(cfg)
 	return cfg
 }
 
@@ -201,6 +209,159 @@ func Reload() (*Config, error) {
 	return Load(LoadedPath())
 }
 
+// ─── Merge ───────────────────────────────────────────────────────────────────
+
+// mergeOverDefaults applies non-zero fields from override onto dst (which holds
+// the built-in defaults). This avoids the YAML zero-value problem where omitted
+// int/float fields are unmarshalled as 0 and silently clobber sensible defaults.
+//
+// Rules:
+//   - int/float: override wins only when != 0
+//   - string:    override wins when != ""
+//   - bool:      override wins when true (defaults are all false, so true is always intentional)
+//   - slices:    override replaces entirely when len > 0 (additive lists)
+func mergeOverDefaults(dst, override *Config) {
+	s := &dst.Scoring
+	o := &override.Scoring
+	if o.BeaconingStrongCV != 0 {
+		s.BeaconingStrongCV = o.BeaconingStrongCV
+	}
+	if o.BeaconingPossibleCV != 0 {
+		s.BeaconingPossibleCV = o.BeaconingPossibleCV
+	}
+	if o.BeaconingMinPackets != 0 {
+		s.BeaconingMinPackets = o.BeaconingMinPackets
+	}
+	if o.BeaconingMinIntervalSec != 0 {
+		s.BeaconingMinIntervalSec = o.BeaconingMinIntervalSec
+	}
+	if o.DNSEntropyThreshold != 0 {
+		s.DNSEntropyThreshold = o.DNSEntropyThreshold
+	}
+	if o.DNSLabelLenThreshold != 0 {
+		s.DNSLabelLenThreshold = o.DNSLabelLenThreshold
+	}
+	if o.ScanConfirmedDests != 0 {
+		s.ScanConfirmedDests = o.ScanConfirmedDests
+	}
+	if o.ScanPossibleDests != 0 {
+		s.ScanPossibleDests = o.ScanPossibleDests
+	}
+	if len(o.ExtraBadPorts) > 0 {
+		s.ExtraBadPorts = o.ExtraBadPorts
+	}
+	if len(o.ExtraStandardPorts) > 0 {
+		s.ExtraStandardPorts = o.ExtraStandardPorts
+	}
+	if len(o.ExtraSuspiciousPaths) > 0 {
+		s.ExtraSuspiciousPaths = o.ExtraSuspiciousPaths
+	}
+	if len(o.ExtraCmdlinePatterns) > 0 {
+		s.ExtraCmdlinePatterns = o.ExtraCmdlinePatterns
+	}
+	if len(o.ExtraHighRiskASNs) > 0 {
+		s.ExtraHighRiskASNs = o.ExtraHighRiskASNs
+	}
+	if len(o.ExtraJA3BadHashes) > 0 {
+		s.ExtraJA3BadHashes = o.ExtraJA3BadHashes
+	}
+	if len(o.ExemptedProcesses) > 0 {
+		s.ExemptedProcesses = o.ExemptedProcesses
+	}
+	// Kill-switches: false is the default, so only true overrides.
+	if o.DisableBinaryPathScoring {
+		s.DisableBinaryPathScoring = true
+	}
+	if o.DisableCmdlineScoring {
+		s.DisableCmdlineScoring = true
+	}
+	if o.DisablePortScoring {
+		s.DisablePortScoring = true
+	}
+	if o.DisableBeaconingScoring {
+		s.DisableBeaconingScoring = true
+	}
+	if o.DisableDNSExfilScoring {
+		s.DisableDNSExfilScoring = true
+	}
+	if o.DisableGeoScoring {
+		s.DisableGeoScoring = true
+	}
+	if o.DisableJA3Scoring {
+		s.DisableJA3Scoring = true
+	}
+	if o.DisableReverseDNSScoring {
+		s.DisableReverseDNSScoring = true
+	}
+	if o.DisableSNIScoring {
+		s.DisableSNIScoring = true
+	}
+
+	c := &dst.Capture
+	oc := &override.Capture
+	if oc.DefaultDurationSec != 0 {
+		c.DefaultDurationSec = oc.DefaultDurationSec
+	}
+	if oc.MaxDurationSec != 0 {
+		c.MaxDurationSec = oc.MaxDurationSec
+	}
+	if oc.DNSTimeoutMS != 0 {
+		c.DNSTimeoutMS = oc.DNSTimeoutMS
+	}
+	if oc.DNSWorkers != 0 {
+		c.DNSWorkers = oc.DNSWorkers
+	}
+	if oc.DNSCacheTTLSec != 0 {
+		c.DNSCacheTTLSec = oc.DNSCacheTTLSec
+	}
+
+	if override.GeoIP.CityDB != "" {
+		dst.GeoIP.CityDB = override.GeoIP.CityDB
+	}
+	if override.GeoIP.ASNDB != "" {
+		dst.GeoIP.ASNDB = override.GeoIP.ASNDB
+	}
+
+	h := &dst.History
+	oh := &override.History
+	if oh.MaxSizeMB != 0 {
+		h.MaxSizeMB = oh.MaxSizeMB
+	}
+	if oh.MaxAgeHours != 0 {
+		h.MaxAgeHours = oh.MaxAgeHours
+	}
+	if oh.PruneToHours != 0 {
+		h.PruneToHours = oh.PruneToHours
+	}
+
+	a := &dst.Alerting
+	oa := &override.Alerting
+	if oa.Enabled {
+		a.Enabled = true
+	}
+	if oa.WebhookURL != "" {
+		a.WebhookURL = oa.WebhookURL
+	}
+	if oa.MinScoreThreshold != 0 {
+		a.MinScoreThreshold = oa.MinScoreThreshold
+	}
+	if oa.DeduplicationWindowSec != 0 {
+		a.DeduplicationWindowSec = oa.DeduplicationWindowSec
+	}
+
+	d := &dst.Daemon
+	od := &override.Daemon
+	if od.Interface != "" {
+		d.Interface = od.Interface
+	}
+	if od.BPFFilter != "" {
+		d.BPFFilter = od.BPFFilter
+	}
+	if od.CaptureIntervalSec != 0 {
+		d.CaptureIntervalSec = od.CaptureIntervalSec
+	}
+}
+
 // ─── Loading ──────────────────────────────────────────────────────────────────
 
 // DefaultPath returns the canonical config file location.
@@ -237,15 +398,19 @@ func Load(path string) (*Config, error) {
 		return nil, fmt.Errorf("read config %s: %w", path, err)
 	}
 
-	if err := yaml.Unmarshal(data, cfg); err != nil {
+	var override Config
+	if err := yaml.Unmarshal(data, &override); err != nil {
 		return nil, fmt.Errorf("parse config %s: %w", path, err)
 	}
+	mergeOverDefaults(cfg, &override)
 
 	if err := validate(cfg); err != nil {
 		return nil, fmt.Errorf("invalid config %s: %w", path, err)
 	}
 
-	compileScoringPatterns(cfg)
+	if err := compileScoringPatterns(cfg); err != nil {
+		return nil, fmt.Errorf("invalid config %s: %w", path, err)
+	}
 	applyEnvOverrides(cfg)
 	Set(cfg)
 
@@ -258,14 +423,20 @@ func Load(path string) (*Config, error) {
 
 // compileScoringPatterns pre-compiles ExtraCmdlinePatterns into
 // CompiledExtraCmdlinePatterns to avoid per-flow regex compilation in hot paths.
-// Invalid patterns are silently skipped (they will be ignored at runtime).
-func compileScoringPatterns(cfg *Config) {
-	cfg.Scoring.CompiledExtraCmdlinePatterns = nil
+// Returns an error if any pattern is invalid so the user knows immediately
+// rather than silently having their rule ignored at runtime.
+func compileScoringPatterns(cfg *Config) error {
+	compiled := make([]*regexp.Regexp, 0, len(cfg.Scoring.ExtraCmdlinePatterns))
 	for _, pat := range cfg.Scoring.ExtraCmdlinePatterns {
-		if re, err := regexp.Compile(pat); err == nil {
-			cfg.Scoring.CompiledExtraCmdlinePatterns = append(cfg.Scoring.CompiledExtraCmdlinePatterns, re)
+		re, err := regexp.Compile(pat)
+		if err != nil {
+			cfg.Scoring.CompiledExtraCmdlinePatterns = nil
+			return fmt.Errorf("scoring.extra_cmdline_patterns: invalid regex %q: %w", pat, err)
 		}
+		compiled = append(compiled, re)
 	}
+	cfg.Scoring.CompiledExtraCmdlinePatterns = compiled
+	return nil
 }
 
 // applyEnvOverrides enforces that environment variables always win over the
@@ -307,8 +478,11 @@ func validate(cfg *Config) error {
 	if c.DNSTimeoutMS <= 0 {
 		return fmt.Errorf("capture.dns_timeout_ms must be > 0, got %d", c.DNSTimeoutMS)
 	}
-	if c.DNSWorkers <= 0 {
-		return fmt.Errorf("capture.dns_workers must be > 0, got %d", c.DNSWorkers)
+	if c.DNSWorkers <= 0 || c.DNSWorkers > 200 {
+		return fmt.Errorf("capture.dns_workers must be in [1, 200], got %d", c.DNSWorkers)
+	}
+	if c.DNSCacheTTLSec < 0 {
+		return fmt.Errorf("capture.dns_cache_ttl_seconds must be >= 0, got %d", c.DNSCacheTTLSec)
 	}
 	h := cfg.History
 	if h.MaxSizeMB <= 0 {
@@ -326,6 +500,9 @@ func validate(cfg *Config) error {
 	a := cfg.Alerting
 	if a.MinScoreThreshold < 0 || a.MinScoreThreshold > 10 {
 		return fmt.Errorf("alerting.min_score_threshold must be in [0, 10], got %v", a.MinScoreThreshold)
+	}
+	if a.DeduplicationWindowSec < 0 {
+		return fmt.Errorf("alerting.deduplication_window_seconds must be >= 0, got %d", a.DeduplicationWindowSec)
 	}
 	return nil
 }

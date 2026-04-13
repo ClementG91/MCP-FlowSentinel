@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -114,6 +115,85 @@ daemon:
 	}
 }
 
+// TestLoad_PartialConfig_DefaultsPreserved verifies that omitting numeric fields
+// from a partial YAML config leaves the built-in defaults in place rather than
+// overwriting them with 0 (the YAML zero-value problem).
+func TestLoad_PartialConfig_DefaultsPreserved(t *testing.T) {
+	original := Get()
+	defer Set(original)
+
+	// Only set alerting; every other section is omitted.
+	yaml := `alerting:
+  enabled: true
+  webhook_url: "https://example.com/hook"
+`
+	path := filepath.Join(t.TempDir(), "partial.yaml")
+	if err := os.WriteFile(path, []byte(yaml), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	def := Default()
+	if cfg.Scoring.BeaconingStrongCV != def.Scoring.BeaconingStrongCV {
+		t.Errorf("BeaconingStrongCV = %v, want default %v", cfg.Scoring.BeaconingStrongCV, def.Scoring.BeaconingStrongCV)
+	}
+	if cfg.Capture.DefaultDurationSec != def.Capture.DefaultDurationSec {
+		t.Errorf("DefaultDurationSec = %d, want default %d", cfg.Capture.DefaultDurationSec, def.Capture.DefaultDurationSec)
+	}
+	if cfg.History.MaxSizeMB != def.History.MaxSizeMB {
+		t.Errorf("MaxSizeMB = %d, want default %d", cfg.History.MaxSizeMB, def.History.MaxSizeMB)
+	}
+	if cfg.Daemon.CaptureIntervalSec != def.Daemon.CaptureIntervalSec {
+		t.Errorf("CaptureIntervalSec = %d, want default %d", cfg.Daemon.CaptureIntervalSec, def.Daemon.CaptureIntervalSec)
+	}
+	// Set fields should be applied.
+	if !cfg.Alerting.Enabled {
+		t.Error("Alerting.Enabled should be true")
+	}
+	if cfg.Alerting.WebhookURL != "https://example.com/hook" {
+		t.Errorf("WebhookURL = %q, want https://example.com/hook", cfg.Alerting.WebhookURL)
+	}
+}
+
+func TestValidate_DNSWorkersBounds(t *testing.T) {
+	original := Get()
+	defer Set(original)
+
+	writeYAML := func(t *testing.T, yaml string) string {
+		t.Helper()
+		path := filepath.Join(t.TempDir(), "config.yaml")
+		if err := os.WriteFile(path, []byte(yaml), 0o600); err != nil {
+			t.Fatalf("WriteFile: %v", err)
+		}
+		return path
+	}
+
+	// 201 workers → too many
+	_, err := Load(writeYAML(t, "capture:\n  dns_workers: 201\n"))
+	if err == nil {
+		t.Error("dns_workers: 201 should return error")
+	}
+
+	// 200 workers → upper bound OK
+	if _, err := Load(writeYAML(t, "capture:\n  dns_workers: 200\n")); err != nil {
+		t.Errorf("dns_workers: 200 should be valid, got: %v", err)
+	}
+
+	// Negative DNS cache TTL
+	_, err = Load(writeYAML(t, "capture:\n  dns_cache_ttl_seconds: -1\n"))
+	if err == nil {
+		t.Error("dns_cache_ttl_seconds: -1 should return error")
+	}
+
+	// Negative dedup window
+	_, err = Load(writeYAML(t, "alerting:\n  deduplication_window_seconds: -1\n"))
+	if err == nil {
+		t.Error("deduplication_window_seconds: -1 should return error")
+	}
+}
+
 func TestLoad_InvalidYAML_ReturnsError(t *testing.T) {
 	original := Get()
 	defer Set(original)
@@ -136,19 +216,19 @@ func TestLoad_InvalidValues_ReturnsError(t *testing.T) {
 		name string
 		yaml string
 	}{
-		{"zero_strong_cv", "scoring:\n  beaconing_strong_cv: 0\n  beaconing_possible_cv: 0.3\n  beaconing_min_packets: 5\n  dns_entropy_threshold: 3.5\n  scan_confirmed_destinations: 20\n  scan_possible_destinations: 8\ncapture:\n  default_duration_seconds: 5\n  max_duration_seconds: 60\n  dns_timeout_ms: 200\n  dns_workers: 20\nhistory:\n  max_size_mb: 50\n  max_age_hours: 24\n  prune_to_hours: 12\ndaemon:\n  capture_interval_seconds: 300\n"},
+		{"neg_strong_cv", "scoring:\n  beaconing_strong_cv: -0.1\n  beaconing_possible_cv: 0.3\n  beaconing_min_packets: 5\n  dns_entropy_threshold: 3.5\n  scan_confirmed_destinations: 20\n  scan_possible_destinations: 8\ncapture:\n  default_duration_seconds: 5\n  max_duration_seconds: 60\n  dns_timeout_ms: 200\n  dns_workers: 20\nhistory:\n  max_size_mb: 50\n  max_age_hours: 24\n  prune_to_hours: 12\ndaemon:\n  capture_interval_seconds: 300\n"},
 		{"cv_order_wrong", "scoring:\n  beaconing_strong_cv: 0.5\n  beaconing_possible_cv: 0.3\n  beaconing_min_packets: 5\n  dns_entropy_threshold: 3.5\n  scan_confirmed_destinations: 20\n  scan_possible_destinations: 8\ncapture:\n  default_duration_seconds: 5\n  max_duration_seconds: 60\n  dns_timeout_ms: 200\n  dns_workers: 20\nhistory:\n  max_size_mb: 50\n  max_age_hours: 24\n  prune_to_hours: 12\ndaemon:\n  capture_interval_seconds: 300\n"},
 		{"too_few_beaconing_packets", "scoring:\n  beaconing_strong_cv: 0.15\n  beaconing_possible_cv: 0.30\n  beaconing_min_packets: 1\n  dns_entropy_threshold: 3.5\n  scan_confirmed_destinations: 20\n  scan_possible_destinations: 8\ncapture:\n  default_duration_seconds: 5\n  max_duration_seconds: 60\n  dns_timeout_ms: 200\n  dns_workers: 20\nhistory:\n  max_size_mb: 50\n  max_age_hours: 24\n  prune_to_hours: 12\ndaemon:\n  capture_interval_seconds: 300\n"},
 		{"scan_order_wrong", "scoring:\n  beaconing_strong_cv: 0.15\n  beaconing_possible_cv: 0.30\n  beaconing_min_packets: 5\n  dns_entropy_threshold: 3.5\n  scan_confirmed_destinations: 5\n  scan_possible_destinations: 10\ncapture:\n  default_duration_seconds: 5\n  max_duration_seconds: 60\n  dns_timeout_ms: 200\n  dns_workers: 20\nhistory:\n  max_size_mb: 50\n  max_age_hours: 24\n  prune_to_hours: 12\ndaemon:\n  capture_interval_seconds: 300\n"},
-		{"zero_dns_entropy", "scoring:\n  beaconing_strong_cv: 0.15\n  beaconing_possible_cv: 0.30\n  beaconing_min_packets: 5\n  dns_entropy_threshold: 0\n  scan_confirmed_destinations: 20\n  scan_possible_destinations: 8\ncapture:\n  default_duration_seconds: 5\n  max_duration_seconds: 60\n  dns_timeout_ms: 200\n  dns_workers: 20\nhistory:\n  max_size_mb: 50\n  max_age_hours: 24\n  prune_to_hours: 12\ndaemon:\n  capture_interval_seconds: 300\n"},
-		{"zero_default_duration", "scoring:\n  beaconing_strong_cv: 0.15\n  beaconing_possible_cv: 0.30\n  beaconing_min_packets: 5\n  dns_entropy_threshold: 3.5\n  scan_confirmed_destinations: 20\n  scan_possible_destinations: 8\ncapture:\n  default_duration_seconds: 0\n  max_duration_seconds: 60\n  dns_timeout_ms: 200\n  dns_workers: 20\nhistory:\n  max_size_mb: 50\n  max_age_hours: 24\n  prune_to_hours: 12\ndaemon:\n  capture_interval_seconds: 300\n"},
+		{"neg_dns_entropy", "scoring:\n  beaconing_strong_cv: 0.15\n  beaconing_possible_cv: 0.30\n  beaconing_min_packets: 5\n  dns_entropy_threshold: -1\n  scan_confirmed_destinations: 20\n  scan_possible_destinations: 8\ncapture:\n  default_duration_seconds: 5\n  max_duration_seconds: 60\n  dns_timeout_ms: 200\n  dns_workers: 20\nhistory:\n  max_size_mb: 50\n  max_age_hours: 24\n  prune_to_hours: 12\ndaemon:\n  capture_interval_seconds: 300\n"},
+		{"neg_default_duration", "scoring:\n  beaconing_strong_cv: 0.15\n  beaconing_possible_cv: 0.30\n  beaconing_min_packets: 5\n  dns_entropy_threshold: 3.5\n  scan_confirmed_destinations: 20\n  scan_possible_destinations: 8\ncapture:\n  default_duration_seconds: -1\n  max_duration_seconds: 60\n  dns_timeout_ms: 200\n  dns_workers: 20\nhistory:\n  max_size_mb: 50\n  max_age_hours: 24\n  prune_to_hours: 12\ndaemon:\n  capture_interval_seconds: 300\n"},
 		{"max_less_than_default", "scoring:\n  beaconing_strong_cv: 0.15\n  beaconing_possible_cv: 0.30\n  beaconing_min_packets: 5\n  dns_entropy_threshold: 3.5\n  scan_confirmed_destinations: 20\n  scan_possible_destinations: 8\ncapture:\n  default_duration_seconds: 30\n  max_duration_seconds: 10\n  dns_timeout_ms: 200\n  dns_workers: 20\nhistory:\n  max_size_mb: 50\n  max_age_hours: 24\n  prune_to_hours: 12\ndaemon:\n  capture_interval_seconds: 300\n"},
-		{"zero_dns_timeout", "scoring:\n  beaconing_strong_cv: 0.15\n  beaconing_possible_cv: 0.30\n  beaconing_min_packets: 5\n  dns_entropy_threshold: 3.5\n  scan_confirmed_destinations: 20\n  scan_possible_destinations: 8\ncapture:\n  default_duration_seconds: 5\n  max_duration_seconds: 60\n  dns_timeout_ms: 0\n  dns_workers: 20\nhistory:\n  max_size_mb: 50\n  max_age_hours: 24\n  prune_to_hours: 12\ndaemon:\n  capture_interval_seconds: 300\n"},
-		{"zero_dns_workers", "scoring:\n  beaconing_strong_cv: 0.15\n  beaconing_possible_cv: 0.30\n  beaconing_min_packets: 5\n  dns_entropy_threshold: 3.5\n  scan_confirmed_destinations: 20\n  scan_possible_destinations: 8\ncapture:\n  default_duration_seconds: 5\n  max_duration_seconds: 60\n  dns_timeout_ms: 200\n  dns_workers: 0\nhistory:\n  max_size_mb: 50\n  max_age_hours: 24\n  prune_to_hours: 12\ndaemon:\n  capture_interval_seconds: 300\n"},
-		{"zero_max_size_mb", "scoring:\n  beaconing_strong_cv: 0.15\n  beaconing_possible_cv: 0.30\n  beaconing_min_packets: 5\n  dns_entropy_threshold: 3.5\n  scan_confirmed_destinations: 20\n  scan_possible_destinations: 8\ncapture:\n  default_duration_seconds: 5\n  max_duration_seconds: 60\n  dns_timeout_ms: 200\n  dns_workers: 20\nhistory:\n  max_size_mb: 0\n  max_age_hours: 24\n  prune_to_hours: 12\ndaemon:\n  capture_interval_seconds: 300\n"},
-		{"zero_max_age", "scoring:\n  beaconing_strong_cv: 0.15\n  beaconing_possible_cv: 0.30\n  beaconing_min_packets: 5\n  dns_entropy_threshold: 3.5\n  scan_confirmed_destinations: 20\n  scan_possible_destinations: 8\ncapture:\n  default_duration_seconds: 5\n  max_duration_seconds: 60\n  dns_timeout_ms: 200\n  dns_workers: 20\nhistory:\n  max_size_mb: 50\n  max_age_hours: 0\n  prune_to_hours: 12\ndaemon:\n  capture_interval_seconds: 300\n"},
+		{"neg_dns_timeout", "scoring:\n  beaconing_strong_cv: 0.15\n  beaconing_possible_cv: 0.30\n  beaconing_min_packets: 5\n  dns_entropy_threshold: 3.5\n  scan_confirmed_destinations: 20\n  scan_possible_destinations: 8\ncapture:\n  default_duration_seconds: 5\n  max_duration_seconds: 60\n  dns_timeout_ms: -1\n  dns_workers: 20\nhistory:\n  max_size_mb: 50\n  max_age_hours: 24\n  prune_to_hours: 12\ndaemon:\n  capture_interval_seconds: 300\n"},
+		{"neg_dns_workers", "scoring:\n  beaconing_strong_cv: 0.15\n  beaconing_possible_cv: 0.30\n  beaconing_min_packets: 5\n  dns_entropy_threshold: 3.5\n  scan_confirmed_destinations: 20\n  scan_possible_destinations: 8\ncapture:\n  default_duration_seconds: 5\n  max_duration_seconds: 60\n  dns_timeout_ms: 200\n  dns_workers: -1\nhistory:\n  max_size_mb: 50\n  max_age_hours: 24\n  prune_to_hours: 12\ndaemon:\n  capture_interval_seconds: 300\n"},
+		{"neg_max_size_mb", "scoring:\n  beaconing_strong_cv: 0.15\n  beaconing_possible_cv: 0.30\n  beaconing_min_packets: 5\n  dns_entropy_threshold: 3.5\n  scan_confirmed_destinations: 20\n  scan_possible_destinations: 8\ncapture:\n  default_duration_seconds: 5\n  max_duration_seconds: 60\n  dns_timeout_ms: 200\n  dns_workers: 20\nhistory:\n  max_size_mb: -1\n  max_age_hours: 24\n  prune_to_hours: 12\ndaemon:\n  capture_interval_seconds: 300\n"},
+		{"neg_max_age", "scoring:\n  beaconing_strong_cv: 0.15\n  beaconing_possible_cv: 0.30\n  beaconing_min_packets: 5\n  dns_entropy_threshold: 3.5\n  scan_confirmed_destinations: 20\n  scan_possible_destinations: 8\ncapture:\n  default_duration_seconds: 5\n  max_duration_seconds: 60\n  dns_timeout_ms: 200\n  dns_workers: 20\nhistory:\n  max_size_mb: 50\n  max_age_hours: -1\n  prune_to_hours: 12\ndaemon:\n  capture_interval_seconds: 300\n"},
 		{"prune_exceeds_age", "scoring:\n  beaconing_strong_cv: 0.15\n  beaconing_possible_cv: 0.30\n  beaconing_min_packets: 5\n  dns_entropy_threshold: 3.5\n  scan_confirmed_destinations: 20\n  scan_possible_destinations: 8\ncapture:\n  default_duration_seconds: 5\n  max_duration_seconds: 60\n  dns_timeout_ms: 200\n  dns_workers: 20\nhistory:\n  max_size_mb: 50\n  max_age_hours: 12\n  prune_to_hours: 24\ndaemon:\n  capture_interval_seconds: 300\n"},
-		{"zero_daemon_interval", "scoring:\n  beaconing_strong_cv: 0.15\n  beaconing_possible_cv: 0.30\n  beaconing_min_packets: 5\n  dns_entropy_threshold: 3.5\n  scan_confirmed_destinations: 20\n  scan_possible_destinations: 8\ncapture:\n  default_duration_seconds: 5\n  max_duration_seconds: 60\n  dns_timeout_ms: 200\n  dns_workers: 20\nhistory:\n  max_size_mb: 50\n  max_age_hours: 24\n  prune_to_hours: 12\ndaemon:\n  capture_interval_seconds: 0\n"},
+		{"neg_daemon_interval", "scoring:\n  beaconing_strong_cv: 0.15\n  beaconing_possible_cv: 0.30\n  beaconing_min_packets: 5\n  dns_entropy_threshold: 3.5\n  scan_confirmed_destinations: 20\n  scan_possible_destinations: 8\ncapture:\n  default_duration_seconds: 5\n  max_duration_seconds: 60\n  dns_timeout_ms: 200\n  dns_workers: 20\nhistory:\n  max_size_mb: 50\n  max_age_hours: 24\n  prune_to_hours: 12\ndaemon:\n  capture_interval_seconds: -1\n"},
 	}
 
 	for _, tc := range tests {
@@ -377,13 +457,55 @@ daemon:
 	}
 }
 
-func TestCompiledExtraCmdlinePatterns_SkipsInvalidPattern(t *testing.T) {
+func TestCompiledExtraCmdlinePatterns_InvalidPatternReturnsError(t *testing.T) {
 	cfg := Default()
 	cfg.Scoring.ExtraCmdlinePatterns = []string{"(?i)valid", "[invalid"}
-	compileScoringPatterns(cfg)
-	// Only the valid pattern should be compiled.
-	if len(cfg.Scoring.CompiledExtraCmdlinePatterns) != 1 {
-		t.Errorf("expected 1 compiled pattern (invalid skipped), got %d", len(cfg.Scoring.CompiledExtraCmdlinePatterns))
+	err := compileScoringPatterns(cfg)
+	if err == nil {
+		t.Error("compileScoringPatterns should return error for invalid regex")
+	}
+	// No patterns should be compiled when an error occurs.
+	if len(cfg.Scoring.CompiledExtraCmdlinePatterns) != 0 {
+		t.Errorf("expected 0 compiled patterns on error, got %d", len(cfg.Scoring.CompiledExtraCmdlinePatterns))
+	}
+}
+
+func TestLoad_InvalidRegex_ReturnsError(t *testing.T) {
+	original := Get()
+	defer Set(original)
+
+	yaml := `capture:
+  default_duration_seconds: 5
+  max_duration_seconds: 60
+  dns_timeout_ms: 200
+  dns_workers: 20
+scoring:
+  beaconing_strong_cv: 0.15
+  beaconing_possible_cv: 0.30
+  beaconing_min_packets: 5
+  dns_entropy_threshold: 3.5
+  scan_confirmed_destinations: 20
+  scan_possible_destinations: 8
+  extra_cmdline_patterns:
+    - "(?i)valid_pattern"
+    - "[this is not valid regex"
+history:
+  max_size_mb: 50
+  max_age_hours: 24
+  prune_to_hours: 12
+daemon:
+  capture_interval_seconds: 300
+`
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte(yaml), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	_, err := Load(path)
+	if err == nil {
+		t.Error("Load with invalid regex should return error")
+	}
+	if !strings.Contains(err.Error(), "extra_cmdline_patterns") {
+		t.Errorf("error should mention extra_cmdline_patterns, got: %v", err)
 	}
 }
 

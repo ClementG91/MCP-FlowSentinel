@@ -41,7 +41,11 @@ func init() {
 	for _, cidr := range []string{
 		"10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16",
 		"127.0.0.0/8", "169.254.0.0/16",
-		"::1/128", "fc00::/7", "fe80::/10",
+		"100.64.0.0/10", // RFC 6598 carrier-grade NAT
+		"::1/128",       // IPv6 loopback
+		"fc00::/7",      // IPv6 unique local (ULA)
+		"fe80::/10",     // IPv6 link-local
+		"100::/64",      // IPv6 discard prefix (RFC 6666)
 	} {
 		_, n, err := net.ParseCIDR(cidr)
 		if err == nil {
@@ -599,6 +603,12 @@ func beaconingScore(ts []time.Time, cfg config.ScoringConfig) (float64, string) 
 	}
 	mean := sum / float64(len(iats))
 	if mean < 1 {
+		return 0, ""
+	}
+	// Skip very short-interval flows (e.g. sub-100ms polling loops) that have
+	// naturally low CV but are not C2 beacons. BeaconingMinIntervalSec == 0
+	// (the default) disables this guard entirely.
+	if cfg.BeaconingMinIntervalSec > 0 && mean < cfg.BeaconingMinIntervalSec*1000 {
 		return 0, ""
 	}
 	var variance float64

@@ -34,15 +34,17 @@ var (
 
 // Stats holds a snapshot of the daemon's runtime metrics.
 type Stats struct {
-	Running       bool      `json:"running"`
-	StartTime     time.Time `json:"start_time,omitempty"`
-	UptimeSec     int64     `json:"uptime_seconds,omitempty"`
-	Interface     string    `json:"interface,omitempty"`
-	IntervalSec   int       `json:"interval_seconds"`
-	WindowsRun    int64     `json:"windows_run"`
-	FlowsScored   int64     `json:"flows_scored"`
-	AlertsFired   int64     `json:"alerts_fired"`
-	WindowErrors  int64     `json:"window_errors"`
+	Running         bool      `json:"running"`
+	StartTime       time.Time `json:"start_time,omitempty"`
+	UptimeSec       int64     `json:"uptime_seconds,omitempty"`
+	Interface       string    `json:"interface,omitempty"`
+	IntervalSec     int       `json:"interval_seconds"`
+	WindowsRun      int64     `json:"windows_run"`
+	FlowsScored     int64     `json:"flows_scored"`
+	AlertsFired     int64     `json:"alerts_fired"`
+	WebhookFailures int64     `json:"webhook_failures"`
+	WindowErrors    int64     `json:"window_errors"`
+	DroppedPackets  uint64    `json:"dropped_packets"`
 }
 
 // GetStats returns a snapshot of the daemon's current runtime metrics.
@@ -53,13 +55,15 @@ func GetStats() Stats {
 	startTimeMu.RUnlock()
 
 	s := Stats{
-		Running:      running.Load(),
-		Interface:    iface,
-		IntervalSec:  config.Get().Daemon.CaptureIntervalSec,
-		WindowsRun:   windowsRun.Load(),
-		FlowsScored:  flowsScored.Load(),
-		AlertsFired:  alerting.FiredCount(),
-		WindowErrors: windowErrors.Load(),
+		Running:         running.Load(),
+		Interface:       iface,
+		IntervalSec:     config.Get().Daemon.CaptureIntervalSec,
+		WindowsRun:      windowsRun.Load(),
+		FlowsScored:     flowsScored.Load(),
+		AlertsFired:     alerting.FiredCount(),
+		WebhookFailures: alerting.WebhookFailures(),
+		WindowErrors:    windowErrors.Load(),
+		DroppedPackets:  capture.DroppedPackets(),
 	}
 	if !st.IsZero() {
 		s.StartTime = st

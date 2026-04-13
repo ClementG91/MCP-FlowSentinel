@@ -14,12 +14,17 @@ import (
 	"log"
 	"net/http"
 	"os"
-	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/ClementG91/MCP-FlowSentinel/internal/aggregate"
+	"github.com/ClementG91/MCP-FlowSentinel/internal/cache"
 	"github.com/ClementG91/MCP-FlowSentinel/internal/config"
+)
+
+const (
+	maxRetries    = 3
+	retryBaseWait = time.Second
 )
 
 // alert is the JSON body sent to the webhook endpoint.
@@ -30,36 +35,44 @@ type alert struct {
 	Flow      aggregate.FlowRecord   `json:"flow"`
 }
 
-// deduplication state: flow key → last alerted time.
-var (
-	dedupMu  sync.Mutex
-	dedupMap = make(map[string]time.Time)
-)
+// dedupCache is a bounded LRU cache (max 10 000 entries) used for alert
+// deduplication. Each entry stores the time the alert was last fired and
+// expires after the configured deduplication window, so memory is naturally
+// reclaimed without a separate cleanup goroutine.
+// Capacity 10 000 covers tens of thousands of unique flows while staying under
+// ~2 MB of RAM.
+var dedupCache = cache.New[string, time.Time](10_000)
 
 // firedCount tracks total alerts fired since startup.
 var firedCount atomic.Int64
 
+// webhookFailures tracks total webhook POST failures (all retries exhausted).
+var webhookFailures atomic.Int64
+
 // FiredCount returns the total number of webhook alerts fired since startup.
 func FiredCount() int64 { return firedCount.Load() }
+
+// WebhookFailures returns the number of webhook deliveries that failed after
+// all retries were exhausted since startup.
+func WebhookFailures() int64 { return webhookFailures.Load() }
 
 // flowDedupeKey returns a stable string identifying a flow for deduplication.
 func flowDedupeKey(flow aggregate.FlowRecord) string {
 	return fmt.Sprintf("%s:%d->%s:%d/%s", flow.SrcIP, flow.SrcPort, flow.DstIP, flow.DstPort, flow.Protocol)
 }
 
-// shouldFire checks the dedup map and returns true if this flow key has not
-// been alerted within the configured deduplication window.
+// shouldFire returns true if this flow key has not been alerted within the
+// configured deduplication window. Uses a bounded LRU cache with TTL so
+// entries are automatically evicted — no unbounded memory growth.
 func shouldFire(flowKey string, windowSec int) bool {
 	window := time.Duration(windowSec) * time.Second
 	if window <= 0 {
 		window = 300 * time.Second
 	}
-	dedupMu.Lock()
-	defer dedupMu.Unlock()
-	if last, ok := dedupMap[flowKey]; ok && time.Since(last) < window {
+	if _, hit := dedupCache.Get(flowKey); hit {
 		return false
 	}
-	dedupMap[flowKey] = time.Now()
+	dedupCache.Set(flowKey, time.Now(), window)
 	return true
 }
 
@@ -111,23 +124,34 @@ func post(url string, flow aggregate.FlowRecord, severity string) {
 	}
 
 	client := &http.Client{Timeout: 5 * time.Second}
-	resp, err := client.Post(url, "application/json", bytes.NewReader(body))
-	if err != nil {
-		log.Printf("alerting: webhook POST failed: %v", err)
+	var lastErr error
+	for attempt := 0; attempt < maxRetries; attempt++ {
+		if attempt > 0 {
+			// Exponential back-off: 1s, 2s, 4s, …
+			time.Sleep(retryBaseWait << (attempt - 1))
+		}
+		resp, err := client.Post(url, "application/json", bytes.NewReader(body))
+		if err != nil {
+			lastErr = err
+			log.Printf("alerting: webhook POST attempt %d/%d failed: %v", attempt+1, maxRetries, err)
+			continue
+		}
+		resp.Body.Close()
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			lastErr = fmt.Errorf("HTTP %d", resp.StatusCode)
+			log.Printf("alerting: webhook attempt %d/%d returned %s", attempt+1, maxRetries, lastErr)
+			continue
+		}
+		log.Printf("alerting: [%s] fired for flow %s→%s score=%.1f",
+			severity,
+			fmt.Sprintf("%s:%d", flow.SrcIP, flow.SrcPort),
+			fmt.Sprintf("%s:%d", flow.DstIP, flow.DstPort),
+			flow.SuspicionScore)
 		return
 	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		log.Printf("alerting: webhook returned HTTP %d", resp.StatusCode)
-		return
-	}
-
-	log.Printf("alerting: [%s] fired for flow %s→%s score=%.1f",
-		severity,
-		fmt.Sprintf("%s:%d", flow.SrcIP, flow.SrcPort),
-		fmt.Sprintf("%s:%d", flow.DstIP, flow.DstPort),
-		flow.SuspicionScore)
+	webhookFailures.Add(1)
+	log.Printf("alerting: all %d attempts failed for %s:%d→%s:%d: %v",
+		maxRetries, flow.SrcIP, flow.SrcPort, flow.DstIP, flow.DstPort, lastErr)
 }
 
 // FireTest sends a single test alert bypassing deduplication and score threshold.
@@ -167,9 +191,7 @@ func FireTest(flow aggregate.FlowRecord) error {
 	return nil
 }
 
-// ResetDedupForTesting clears the deduplication map. Only for tests.
+// ResetDedupForTesting replaces the dedup cache with a fresh one. Only for tests.
 func ResetDedupForTesting() {
-	dedupMu.Lock()
-	dedupMap = make(map[string]time.Time)
-	dedupMu.Unlock()
+	dedupCache = cache.New[string, time.Time](10_000)
 }
