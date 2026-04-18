@@ -80,6 +80,11 @@ func CapturePackets(ctx context.Context, iface, bpfFilter string) (<-chan Packet
 // When exitOnEOF is true (offline mode) the goroutine returns on io.EOF;
 // otherwise errors (e.g. pcap read timeouts in live mode) are retried.
 // In live mode, pcap Stats() are sampled every 5 seconds to detect kernel drops.
+//
+// TCP Stream Reassembly: each TCP packet is also fed to a StreamReassembler
+// so that TLS ClientHellos fragmented across multiple segments are correctly
+// SNI- and JA3-fingerprinted. Reassembled events are forwarded on ch alongside
+// regular packet events.
 func drainPackets(ctx context.Context, handle *pcap.Handle, ch chan<- PacketEvent, exitOnEOF bool) {
 	defer close(ch)
 	defer handle.Close()
@@ -87,17 +92,49 @@ func drainPackets(ctx context.Context, handle *pcap.Handle, ch chan<- PacketEven
 	src := gopacket.NewPacketSource(handle, handle.LinkType())
 	src.NoCopy = true
 
+	// TCP reassembler for fragmented TLS ClientHellos.
+	reassembler, sniCh := NewStreamReassembler()
+
 	// Tick for periodic drop-counter sampling (live captures only).
 	var statsTicker <-chan time.Time
+	var flushTicker <-chan time.Time
 	if !exitOnEOF {
-		t := time.NewTicker(5 * time.Second)
-		defer t.Stop()
-		statsTicker = t.C
+		st := time.NewTicker(5 * time.Second)
+		defer st.Stop()
+		statsTicker = st.C
+
+		ft := time.NewTicker(streamFlushInterval)
+		defer ft.Stop()
+		flushTicker = ft.C
+	}
+
+	// forward drains any pending reassembly results onto ch (non-blocking per item).
+	forward := func() {
+		for {
+			select {
+			case evt, ok := <-sniCh:
+				if !ok {
+					return
+				}
+				select {
+				case ch <- evt:
+				default:
+					// Drop if ch is full — reassembly results are best-effort.
+				}
+			default:
+				return
+			}
+		}
 	}
 
 	for {
+		// Always drain reassembly results first so they don't block the assembler.
+		forward()
+
 		select {
 		case <-ctx.Done():
+			reassembler.FlushAll()
+			forward()
 			return
 		case <-statsTicker:
 			if stats, err := handle.Stats(); err == nil {
@@ -107,21 +144,31 @@ func drainPackets(ctx context.Context, handle *pcap.Handle, ch chan<- PacketEven
 						uint64(stats.PacketsDropped)-prev, stats.PacketsDropped)
 				}
 			}
+		case <-flushTicker:
+			reassembler.FlushOlderThan(time.Now().Add(-streamFlushInterval))
+			forward()
 		default:
 		}
 
 		pkt, err := src.NextPacket()
 		if err != nil {
 			if exitOnEOF && err == io.EOF {
+				reassembler.FlushAll()
+				forward()
 				return
 			}
 			select {
 			case <-ctx.Done():
+				reassembler.FlushAll()
+				forward()
 				return
 			default:
 				continue
 			}
 		}
+
+		// Feed TCP packets to the reassembler for fragmented ClientHello handling.
+		reassembler.Add(pkt)
 
 		event := parsePacket(pkt)
 		if event == nil {
@@ -131,6 +178,8 @@ func drainPackets(ctx context.Context, handle *pcap.Handle, ch chan<- PacketEven
 		select {
 		case ch <- *event:
 		case <-ctx.Done():
+			reassembler.FlushAll()
+			forward()
 			return
 		}
 	}
