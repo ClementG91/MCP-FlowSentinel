@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/ClementG91/MCP-FlowSentinel/internal/cache"
+	"github.com/ClementG91/MCP-FlowSentinel/internal/capture"
 	"github.com/ClementG91/MCP-FlowSentinel/internal/config"
 	"github.com/ClementG91/MCP-FlowSentinel/internal/intel"
 	"github.com/ClementG91/MCP-FlowSentinel/internal/ja3"
@@ -139,10 +140,23 @@ type FlowRecord struct {
 	JA3Hash     string `json:"ja3_hash,omitempty"`     // MD5 of TLS ClientHello parameters
 	JA3KnownBad string `json:"ja3_known_bad,omitempty"` // malware family if hash matches known-bad list
 	// QUIC / transport enrichment
-	IsQUIC bool `json:"is_quic,omitempty"` // true when at least one QUIC Initial packet was observed
+	IsQUIC  bool `json:"is_quic,omitempty"`  // true when at least one QUIC Initial packet was observed
+	IsHTTP2 bool `json:"is_http2,omitempty"` // true when HTTP/2 client preface was observed
 	// DNS response analysis
 	NXDomainCount int    `json:"nxdomain_count,omitempty"` // number of NXDOMAIN responses in this flow
 	MinDNSTTL     uint32 `json:"min_dns_ttl,omitempty"`    // minimum A/AAAA TTL observed (0 = no answers)
+	// HTTP/1.1 enrichment
+	HTTPMethod    string `json:"http_method,omitempty"`
+	HTTPHost      string `json:"http_host,omitempty"`
+	HTTPUserAgent string `json:"http_user_agent,omitempty"`
+	HTTPURI       string `json:"http_uri,omitempty"`
+	// TLS certificate anomalies (from ServerCertificate message)
+	TLSCertSelfSigned  bool   `json:"tls_cert_self_signed,omitempty"`
+	TLSCertExpired     bool   `json:"tls_cert_expired,omitempty"`
+	TLSCertValidDays   int    `json:"tls_cert_valid_days,omitempty"`
+	TLSCertSubjectCN   string `json:"tls_cert_cn,omitempty"`
+	TLSCertHasSAN      bool   `json:"tls_cert_has_san,omitempty"`
+	TLSCertIsIPCN      bool   `json:"tls_cert_ip_cn,omitempty"`
 	// Analysis fields
 	SuspicionScore   float64  `json:"suspicion_score"`
 	RiskLevel        string   `json:"risk_level"`
@@ -173,6 +187,14 @@ type flowState struct {
 	isQUIC        bool                // any packet in this flow was a QUIC Initial
 	nxdomainCount int                 // number of NXDOMAIN responses in this flow
 	minDNSTTL     uint32              // minimum A/AAAA TTL from DNS responses; 0 = not seen
+	// HTTP/1.1 enrichment — first observed request wins.
+	httpMethod    string
+	httpHost      string
+	httpUserAgent string
+	httpURI       string
+	isHTTP2       bool
+	// TLS server certificate — first parsed cert wins.
+	tlsCertInfo *capture.CertInfo
 }
 
 // Aggregator accumulates PacketEvents into flow states using a sync.Map
@@ -197,6 +219,14 @@ type PacketEvent struct {
 	IsQUIC        bool   // true when UDP 443 payload is a QUIC Initial packet
 	DNSNXDomain   bool   // DNS response returned NXDOMAIN
 	DNSMinRespTTL uint32 // minimum A/AAAA TTL from DNS response (0 = no answers)
+	// HTTP/1.1 enrichment.
+	HTTPMethod    string // "GET", "POST", "CONNECT", …
+	HTTPHost      string
+	HTTPUserAgent string
+	HTTPURI       string
+	IsHTTP2       bool
+	// TLS server certificate anomalies.
+	TLSCertInfo *capture.CertInfo
 }
 
 // Add processes a single packet event.
@@ -241,6 +271,9 @@ func (a *Aggregator) Add(pkt PacketEvent) {
 	if pkt.IsQUIC {
 		fs.isQUIC = true
 	}
+	if pkt.IsHTTP2 {
+		fs.isHTTP2 = true
+	}
 	if pkt.DNSNXDomain {
 		fs.nxdomainCount++
 	}
@@ -248,6 +281,17 @@ func (a *Aggregator) Add(pkt PacketEvent) {
 		if fs.minDNSTTL == 0 || pkt.DNSMinRespTTL < fs.minDNSTTL {
 			fs.minDNSTTL = pkt.DNSMinRespTTL
 		}
+	}
+	// HTTP/1.1 — keep first observed request per flow.
+	if pkt.HTTPMethod != "" && fs.httpMethod == "" {
+		fs.httpMethod = pkt.HTTPMethod
+		fs.httpHost = pkt.HTTPHost
+		fs.httpUserAgent = pkt.HTTPUserAgent
+		fs.httpURI = pkt.HTTPURI
+	}
+	// TLS server cert — keep first successfully parsed cert per flow.
+	if pkt.TLSCertInfo != nil && fs.tlsCertInfo == nil {
+		fs.tlsCertInfo = pkt.TLSCertInfo
 	}
 	fs.mu.Unlock()
 }
@@ -290,8 +334,14 @@ func (a *Aggregator) Finalize(resolver ProcessResolver) []FlowRecord {
 
 		ja3h := fs.ja3Hash
 		isQUIC := fs.isQUIC
+		isHTTP2 := fs.isHTTP2
 		nxdomainCount := fs.nxdomainCount
 		minDNSTTL := fs.minDNSTTL
+		httpMethod := fs.httpMethod
+		httpHost := fs.httpHost
+		httpUA := fs.httpUserAgent
+		httpURI := fs.httpURI
+		certInfo := fs.tlsCertInfo
 		rec := FlowRecord{
 			SrcIP:         key.SrcIP,
 			DstIP:         key.DstIP,
@@ -306,8 +356,22 @@ func (a *Aggregator) Finalize(resolver ProcessResolver) []FlowRecord {
 			TLSSNIName:    sniName,
 			JA3Hash:       ja3h,
 			IsQUIC:        isQUIC,
+			IsHTTP2:       isHTTP2,
 			NXDomainCount: nxdomainCount,
 			MinDNSTTL:     minDNSTTL,
+			HTTPMethod:    httpMethod,
+			HTTPHost:      httpHost,
+			HTTPUserAgent: httpUA,
+			HTTPURI:       httpURI,
+		}
+		// Flatten TLS cert fields into the record (avoids pointer in JSON output).
+		if certInfo != nil {
+			rec.TLSCertSelfSigned = certInfo.IsSelfSigned
+			rec.TLSCertExpired = certInfo.IsExpired
+			rec.TLSCertValidDays = certInfo.ValidityDays
+			rec.TLSCertSubjectCN = certInfo.SubjectCN
+			rec.TLSCertHasSAN = certInfo.HasSAN
+			rec.TLSCertIsIPCN = certInfo.IsIPAddressCN
 		}
 		fs.mu.Unlock()
 
@@ -736,6 +800,59 @@ func score(key FlowKey, rec FlowRecord, ts []time.Time) (float64, []string) {
 		}
 	}
 
+	// ── HTTP/1.1 layer analysis ──────────────────────────────────────────────
+	if !cfg.DisableHTTPScoring && rec.HTTPMethod != "" {
+		// HTTP CONNECT tunnelling — proxy abuse or C2 over HTTP.
+		if rec.HTTPMethod == "CONNECT" {
+			add(2.0, "HTTP CONNECT tunnel — potential proxy/C2 channel")
+		}
+		// Known-malicious User-Agent strings (C2 framework defaults).
+		if rec.HTTPUserAgent != "" && capture.IsKnownBadUserAgent(rec.HTTPUserAgent) {
+			add(3.0, fmt.Sprintf("suspicious HTTP User-Agent: %q", truncateStr(rec.HTTPUserAgent, 80)))
+		}
+		// Missing / very short User-Agent — unusual for legitimate browsers.
+		if len(rec.HTTPUserAgent) < 5 {
+			add(1.0, "empty or minimal HTTP User-Agent")
+		}
+		// HTTP on a non-standard port (not 80, 8080, 8000, 8888, 3000).
+		if !capture.IsStandardHTTPPort(key.DstPort) && key.DstPort != 443 {
+			add(1.5, fmt.Sprintf("HTTP traffic on non-standard port %d", key.DstPort))
+		}
+		// High-entropy URI path — common in C2 check-in beacons.
+		if rec.HTTPURI != "" && capture.IsHighEntropyURI(rec.HTTPURI) {
+			add(1.5, fmt.Sprintf("high-entropy HTTP URI: %s", truncateStr(rec.HTTPURI, 60)))
+		}
+	}
+
+	// ── HTTP/2 on non-standard port ──────────────────────────────────────────
+	if !cfg.DisableHTTPScoring && rec.IsHTTP2 && key.DstPort != 443 && key.DstPort != 8443 {
+		add(1.5, fmt.Sprintf("HTTP/2 on non-standard port %d — potential C2 (e.g. Sliver gRPC)", key.DstPort))
+	}
+
+	// ── TLS certificate anomalies ────────────────────────────────────────────
+	if !cfg.DisableCertScoring {
+		if rec.TLSCertSelfSigned {
+			cn := rec.TLSCertSubjectCN
+			if cn == "" {
+				cn = "(no CN)"
+			}
+			add(2.0, fmt.Sprintf("self-signed TLS certificate (CN=%s)", cn))
+		}
+		if rec.TLSCertExpired {
+			add(1.5, "expired TLS certificate")
+		}
+		if rec.TLSCertValidDays > 3650 { // > 10 years — typical C2 default
+			add(1.5, fmt.Sprintf("suspicious certificate lifetime: %d days (>10 years)", rec.TLSCertValidDays))
+		}
+		if rec.TLSCertIsIPCN {
+			add(1.0, fmt.Sprintf("TLS certificate CN is an IP address: %s", rec.TLSCertSubjectCN))
+		}
+		if rec.TLSCertSubjectCN != "" && !rec.TLSCertHasSAN && !rec.TLSCertSelfSigned {
+			// Legitimate CAs have required SANs since 2017; absence is suspicious.
+			add(0.5, "TLS certificate has no Subject Alternative Name (SAN)")
+		}
+	}
+
 	if total > 10.0 {
 		total = 10.0
 	}
@@ -786,6 +903,14 @@ func beaconingScore(ts []time.Time, cfg config.ScoringConfig) (float64, string) 
 }
 
 // riskLabel converts a numeric score to a human-readable risk tier.
+// truncateStr returns s truncated to at most maxLen characters.
+func truncateStr(s string, maxLen int) string {
+	if len(s) <= maxLen {
+		return s
+	}
+	return s[:maxLen] + "…"
+}
+
 func riskLabel(score float64) string {
 	switch {
 	case score >= 7.0:

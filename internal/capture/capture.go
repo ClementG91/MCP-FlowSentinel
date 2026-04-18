@@ -40,6 +40,14 @@ type PacketEvent struct {
 	// DNS response enrichment (port-53 responses only).
 	DNSNXDomain   bool   // true when response code is NXDOMAIN (3)
 	DNSMinRespTTL uint32 // minimum A/AAAA record TTL in the response; 0 means no A/AAAA answers
+	// HTTP/1.1 enrichment (TCP only, first packet of a request/response).
+	HTTPMethod    string // "GET", "POST", "CONNECT", … — "" if not HTTP
+	HTTPHost      string // HTTP Host header value
+	HTTPUserAgent string // HTTP User-Agent header value
+	HTTPURI       string // HTTP request URI (first 256 chars)
+	IsHTTP2       bool   // true when payload starts with the HTTP/2 client preface
+	// TLS server certificate (TCP 443 only, from ServerCertificate message).
+	TLSCertInfo *CertInfo // non-nil when a server certificate was successfully parsed
 }
 
 // CapturePackets opens a live pcap handle on iface, applies an optional BPF
@@ -200,10 +208,31 @@ func parsePacket(pkt gopacket.Packet) *PacketEvent {
 		event.DNSNXDomain, event.DNSMinRespTTL = extractDNSResponse(pkt)
 	}
 
-	// TLS enrichment — SNI + JA3 fingerprint from ClientHello (TCP only).
+	// TLS / HTTP enrichment — TCP only.
 	if proto == "TCP" && len(tcpPayload) > 0 {
+		// TLS ClientHello: SNI + JA3 fingerprint.
 		event.TLSSNIName = extractTLSSNI(tcpPayload)
 		event.JA3Hash = ja3.Fingerprint(tcpPayload)
+
+		// TLS ServerCertificate: cert anomaly detection (inbound on 443/8443).
+		if srcPort == 443 || srcPort == 8443 {
+			event.TLSCertInfo = extractServerCert(tcpPayload)
+		}
+
+		// HTTP/2 preface detection.
+		if IsHTTP2Preface(tcpPayload) {
+			event.IsHTTP2 = true
+		}
+
+		// HTTP/1.1 parsing (only when payload is not TLS — TLS records start 0x16).
+		if !event.IsHTTP2 && len(tcpPayload) > 0 && tcpPayload[0] != 0x16 {
+			if hi := extractHTTPInfo(tcpPayload); hi != nil {
+				event.HTTPMethod = hi.Method
+				event.HTTPHost = hi.Host
+				event.HTTPUserAgent = hi.UserAgent
+				event.HTTPURI = hi.URI
+			}
+		}
 	}
 
 	// QUIC detection — UDP 443 with a QUIC Initial packet long-header.

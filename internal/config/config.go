@@ -98,6 +98,8 @@ type ScoringConfig struct {
 	DisableLateralMovementScoring  bool `yaml:"disable_lateral_movement_scoring"`
 	DisableProtocolAnomalyScoring  bool `yaml:"disable_protocol_anomaly_scoring"`
 	DisableAsymmetricScoring       bool `yaml:"disable_asymmetric_scoring"`
+	DisableHTTPScoring             bool `yaml:"disable_http_scoring"`
+	DisableCertScoring             bool `yaml:"disable_cert_scoring"`
 
 	// CompiledExtraCmdlinePatterns holds compiled versions of ExtraCmdlinePatterns.
 	// Populated automatically after config load. Not serialized — use this
@@ -388,6 +390,12 @@ func mergeOverDefaults(dst, override *Config) {
 	}
 	if o.DisableAsymmetricScoring {
 		s.DisableAsymmetricScoring = true
+	}
+	if o.DisableHTTPScoring {
+		s.DisableHTTPScoring = true
+	}
+	if o.DisableCertScoring {
+		s.DisableCertScoring = true
 	}
 
 	c := &dst.Capture
