@@ -9,6 +9,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/ClementG91/MCP-FlowSentinel/internal/config"
 	"github.com/ClementG91/MCP-FlowSentinel/internal/ja3"
 	"github.com/google/gopacket"
 	"github.com/google/gopacket/layers"
@@ -54,9 +55,20 @@ type PacketEvent struct {
 	TLSCertInfo *CertInfo // non-nil when a server certificate was successfully parsed
 }
 
+const (
+	// defaultPacketBufSize is the fallback channel capacity when not configured.
+	defaultPacketBufSize = 4096
+	// minPacketBufSize / maxPacketBufSize clamp the configured value.
+	minPacketBufSize = 256
+	maxPacketBufSize = 65536
+	// bufWarnThreshold logs a warning when the channel fill ratio exceeds this.
+	bufWarnThreshold = 0.70
+)
+
 // CapturePackets opens a live pcap handle on iface, applies an optional BPF
 // filter and streams decoded PacketEvents until ctx is cancelled.
 // The returned channel is closed when capture ends.
+// Channel capacity is taken from config.capture.packet_buffer_size (default 4096).
 func CapturePackets(ctx context.Context, iface, bpfFilter string) (<-chan PacketEvent, error) {
 	// 100 ms pcap read timeout lets us poll ctx at a reasonable rate.
 	handle, err := pcap.OpenLive(iface, 65536, true, 100*time.Millisecond)
@@ -71,7 +83,18 @@ func CapturePackets(ctx context.Context, iface, bpfFilter string) (<-chan Packet
 		}
 	}
 
-	ch := make(chan PacketEvent, 4096)
+	bufSize := config.Get().Capture.PacketBufferSize
+	if bufSize <= 0 {
+		bufSize = defaultPacketBufSize
+	}
+	if bufSize < minPacketBufSize {
+		bufSize = minPacketBufSize
+	}
+	if bufSize > maxPacketBufSize {
+		bufSize = maxPacketBufSize
+	}
+
+	ch := make(chan PacketEvent, bufSize)
 	go drainPackets(ctx, handle, ch, false)
 	return ch, nil
 }
@@ -108,6 +131,12 @@ func drainPackets(ctx context.Context, handle *pcap.Handle, ch chan<- PacketEven
 		flushTicker = ft.C
 	}
 
+	// Fill-ratio monitoring: warn when channel stays >70% full for >5s.
+	// This indicates the consumer is slower than the producer — raise
+	// capture.packet_buffer_size or reduce traffic if this fires repeatedly.
+	bufCap := cap(ch)
+	var highFillSince time.Time
+
 	// forward drains any pending reassembly results onto ch (non-blocking per item).
 	forward := func() {
 		for {
@@ -143,6 +172,21 @@ func drainPackets(ctx context.Context, handle *pcap.Handle, ch chan<- PacketEven
 					log.Printf("capture: kernel dropped %d packets (total %d) — consider reducing capture load or increasing buffer",
 						uint64(stats.PacketsDropped)-prev, stats.PacketsDropped)
 				}
+			}
+			// Warn when the packet channel fill ratio exceeds bufWarnThreshold
+			// for more than 5 s — the consumer is falling behind the producer.
+			fill := float64(len(ch)) / float64(bufCap)
+			if fill > bufWarnThreshold {
+				if highFillSince.IsZero() {
+					highFillSince = time.Now()
+				} else if time.Since(highFillSince) > 5*time.Second {
+					log.Printf("capture: packet channel %.0f%% full for >5s (capacity %d) — "+
+						"consider raising capture.packet_buffer_size in config",
+						fill*100, bufCap)
+					highFillSince = time.Now() // reset so we warn again in another 5s
+				}
+			} else {
+				highFillSince = time.Time{} // below threshold — reset timer
 			}
 		case <-flushTicker:
 			reassembler.FlushOlderThan(time.Now().Add(-streamFlushInterval))

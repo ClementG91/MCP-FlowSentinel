@@ -1,11 +1,14 @@
 package history
 
 import (
+	"bufio"
+	"compress/gzip"
 	"encoding/json"
 	"fmt"
 	"math"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -580,5 +583,204 @@ func TestQuery_LegacyEntries_BackwardCompat(t *testing.T) {
 	}
 	if len(entries[0].Flows) != 1 {
 		t.Errorf("expected 1 flow in legacy entry, got %d", len(entries[0].Flows))
+	}
+}
+
+// ─── Gzip rotation ────────────────────────────────────────────────────────────
+
+// enableRotation sets CompressRotated=true on the global config and returns a
+// restore function that the caller should defer.
+func enableRotation(t *testing.T, maxRotatedDays int) func() {
+	t.Helper()
+	orig := config.Get()
+	cfg := *orig
+	cfg.History.CompressRotated = true
+	cfg.History.MaxRotatedDays = maxRotatedDays
+	config.Set(&cfg)
+	return func() { config.Set(orig) }
+}
+
+func TestMergeIntoGzip_CreateAndRead(t *testing.T) {
+	dir := t.TempDir()
+	gzPath := filepath.Join(dir, "test.jsonl.gz")
+
+	lines := [][]byte{[]byte(`{"source":"a"}`), []byte(`{"source":"b"}`)}
+	if err := mergeIntoGzip(gzPath, lines); err != nil {
+		t.Fatalf("mergeIntoGzip: %v", err)
+	}
+
+	// Read back via queryCompressedFiles indirectly through a full Query round-trip.
+	// Here we verify the file is a valid gzip that can be opened and read.
+	f, err := os.Open(gzPath)
+	if err != nil {
+		t.Fatalf("open gz: %v", err)
+	}
+	defer f.Close()
+	gr, err := gzip.NewReader(f)
+	if err != nil {
+		t.Fatalf("gzip.NewReader: %v", err)
+	}
+	defer gr.Close()
+	scanner := bufio.NewScanner(gr)
+	var got []string
+	for scanner.Scan() {
+		got = append(got, scanner.Text())
+	}
+	if len(got) != 2 {
+		t.Fatalf("expected 2 lines, got %d", len(got))
+	}
+}
+
+func TestMergeIntoGzip_MergesWithExistingContent(t *testing.T) {
+	dir := t.TempDir()
+	gzPath := filepath.Join(dir, "test.jsonl.gz")
+
+	first := [][]byte{[]byte(`{"source":"first"}`)}
+	if err := mergeIntoGzip(gzPath, first); err != nil {
+		t.Fatalf("first mergeIntoGzip: %v", err)
+	}
+
+	second := [][]byte{[]byte(`{"source":"second"}`)}
+	if err := mergeIntoGzip(gzPath, second); err != nil {
+		t.Fatalf("second mergeIntoGzip: %v", err)
+	}
+
+	f, _ := os.Open(gzPath)
+	defer f.Close()
+	gr, _ := gzip.NewReader(f)
+	defer gr.Close()
+	scanner := bufio.NewScanner(gr)
+	var count int
+	for scanner.Scan() {
+		count++
+	}
+	if count != 2 {
+		t.Errorf("expected 2 merged lines, got %d", count)
+	}
+}
+
+func TestRotateOldEntriesToGzip_Disabled_Noop(t *testing.T) {
+	setup(t)
+	// CompressRotated is false by default — no .gz file must be created.
+	injectEntry(t, Entry{
+		Timestamp: time.Now().Add(-48 * time.Hour),
+		Source:    "old",
+		FlowCount: 1,
+		Flows:     []aggregate.FlowRecord{makeFlow("1.1.1.1", "2.2.2.2", "p", 1.0)},
+	})
+	mu.Lock()
+	rotateOldEntriesToGzip()
+	mu.Unlock()
+
+	dir := filepath.Dir(histPath)
+	des, _ := os.ReadDir(dir)
+	for _, de := range des {
+		if strings.HasSuffix(de.Name(), ".jsonl.gz") {
+			t.Errorf("unexpected gz file created when CompressRotated=false: %s", de.Name())
+		}
+	}
+}
+
+func TestRotateOldEntriesToGzip_MovesOldAndKeepsToday(t *testing.T) {
+	setup(t)
+	restore := enableRotation(t, 0)
+	defer restore()
+
+	yesterday := time.Now().UTC().Add(-25 * time.Hour)
+	injectEntry(t, Entry{
+		Timestamp: yesterday,
+		Source:    "yesterday",
+		FlowCount: 1,
+		Flows:     []aggregate.FlowRecord{makeFlow("1.1.1.1", "2.2.2.2", "p", 1.0)},
+	})
+	Append("today", []aggregate.FlowRecord{makeFlow("3.3.3.3", "4.4.4.4", "q", 2.0)})
+
+	mu.Lock()
+	rotateOldEntriesToGzip()
+	mu.Unlock()
+
+	// The hot file should only contain today's entry.
+	entries, err := Query(QueryOpts{MaxAge: time.Hour})
+	if err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+	for _, e := range entries {
+		if e.Source == "yesterday" {
+			t.Error("yesterday's entry should have been rotated out of the hot file")
+		}
+	}
+
+	// A .gz file for yesterday's date should exist.
+	expectedDay := yesterday.Format("2006-01-02")
+	gzPath := filepath.Join(filepath.Dir(histPath), "history_"+expectedDay+".jsonl.gz")
+	if _, err := os.Stat(gzPath); err != nil {
+		t.Errorf("expected gz file %s to exist: %v", gzPath, err)
+	}
+}
+
+func TestQueryCompressedFiles_ReturnsEntriesFromGzip(t *testing.T) {
+	setup(t)
+	restore := enableRotation(t, 30)
+	defer restore()
+
+	// Directly write a gz file for 2 days ago.
+	twoDaysAgo := time.Now().UTC().Add(-49 * time.Hour)
+	day := twoDaysAgo.Format("2006-01-02")
+	entry := Entry{
+		SchemaVersion: currentSchemaVersion,
+		Timestamp:     twoDaysAgo,
+		Source:        "gz-source",
+		FlowCount:     1,
+		Flows:         []aggregate.FlowRecord{makeFlow("5.5.5.5", "6.6.6.6", "gz-proc", 7.0)},
+	}
+	b, _ := json.Marshal(entry)
+	gzPath := filepath.Join(filepath.Dir(histPath), "history_"+day+".jsonl.gz")
+	if err := mergeIntoGzip(gzPath, [][]byte{b}); err != nil {
+		t.Fatalf("mergeIntoGzip: %v", err)
+	}
+
+	// Query with a window that covers 3 days.
+	results, err := Query(QueryOpts{MaxAge: 72 * time.Hour})
+	if err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+	found := false
+	for _, e := range results {
+		if e.Source == "gz-source" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("expected entry from compressed file to appear in Query results")
+	}
+}
+
+func TestRotateOldEntriesToGzip_PurgesOldGzFiles(t *testing.T) {
+	setup(t)
+	restore := enableRotation(t, 7)
+	defer restore()
+
+	dir := filepath.Dir(histPath)
+	// Plant a .gz file that is 10 days old — older than MaxRotatedDays=7.
+	oldDay := time.Now().UTC().AddDate(0, 0, -10).Format("2006-01-02")
+	oldGz := filepath.Join(dir, "history_"+oldDay+".jsonl.gz")
+	if err := mergeIntoGzip(oldGz, [][]byte{[]byte(`{}`)}); err != nil {
+		t.Fatalf("plant old gz: %v", err)
+	}
+
+	// Plant an entry older than today to trigger actual rotation.
+	injectEntry(t, Entry{
+		Timestamp: time.Now().UTC().Add(-25 * time.Hour),
+		Source:    "old",
+		FlowCount: 1,
+		Flows:     []aggregate.FlowRecord{makeFlow("1.1.1.1", "2.2.2.2", "p", 1.0)},
+	})
+
+	mu.Lock()
+	rotateOldEntriesToGzip()
+	mu.Unlock()
+
+	if _, err := os.Stat(oldGz); !os.IsNotExist(err) {
+		t.Errorf("expected old gz file to be purged, but it still exists (err=%v)", err)
 	}
 }

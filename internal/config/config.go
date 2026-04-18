@@ -117,6 +117,10 @@ type CaptureConfig struct {
 	// DNSCacheTTLSec is how long resolved (or negative) PTR results are reused.
 	// 0 means use the built-in default (300 s). Takes effect on next restart.
 	DNSCacheTTLSec int `yaml:"dns_cache_ttl_seconds"`
+	// PacketBufferSize is the capacity of the in-process packet event channel.
+	// Increase on high-throughput interfaces (> 100 Mbps) to reduce drops.
+	// 0 means use the built-in default (4096). Must be between 256 and 65536.
+	PacketBufferSize int `yaml:"packet_buffer_size"`
 }
 
 // GeoIPConfig points to MaxMind database files.
@@ -131,6 +135,14 @@ type HistoryConfig struct {
 	MaxSizeMB    int `yaml:"max_size_mb"`
 	MaxAgeHours  int `yaml:"max_age_hours"`
 	PruneToHours int `yaml:"prune_to_hours"`
+	// CompressRotated enables gzip compression of the previous day's history
+	// when the rolling window advances past midnight. Compressed files are named
+	// history_YYYY-MM-DD.jsonl.gz and kept for MaxRotatedDays days.
+	// Default: false (no compression, single file as before).
+	CompressRotated bool `yaml:"compress_rotated"`
+	// MaxRotatedDays is how many compressed daily files to retain.
+	// Older files are deleted automatically. Default: 7.
+	MaxRotatedDays int `yaml:"max_rotated_days"`
 }
 
 // AlertingConfig enables optional webhook notifications for high-score flows.
@@ -422,6 +434,9 @@ func mergeOverDefaults(dst, override *Config) {
 	}
 	if oc.DNSCacheTTLSec != 0 {
 		c.DNSCacheTTLSec = oc.DNSCacheTTLSec
+	}
+	if oc.PacketBufferSize != 0 {
+		c.PacketBufferSize = oc.PacketBufferSize
 	}
 
 	if override.GeoIP.CityDB != "" {

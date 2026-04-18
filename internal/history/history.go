@@ -5,7 +5,9 @@ package history
 
 import (
 	"bufio"
+	"compress/gzip"
 	"encoding/json"
+	"fmt"
 	"log"
 	"os"
 	"path/filepath"
@@ -120,6 +122,8 @@ func Append(source string, flows []aggregate.FlowRecord) {
 // When the in-memory offset index is populated it seeks directly to the
 // first entry that could fall within the requested time window, skipping
 // any earlier bytes entirely (O(log n) seek vs O(n) full scan).
+// If CompressRotated is enabled, rotated daily gzip files are also consulted
+// whenever the requested time window spans more than today.
 func Query(opts QueryOpts) ([]Entry, error) {
 	if opts.MaxAge <= 0 {
 		opts.MaxAge = time.Duration(config.Get().History.MaxAgeHours) * time.Hour
@@ -185,8 +189,83 @@ func Query(opts QueryOpts) ([]Entry, error) {
 		entry.FlowCount = len(filtered)
 		results = append(results, entry)
 	}
+	if err := scanner.Err(); err != nil {
+		return results, err
+	}
 
-	return results, scanner.Err()
+	// Also search rotated daily gzip files when the window spans multiple days.
+	if config.Get().History.CompressRotated {
+		compressed := queryCompressedFiles(cutoff, opts)
+		results = append(results, compressed...)
+		sort.Slice(results, func(i, j int) bool {
+			return results[i].Timestamp.Before(results[j].Timestamp)
+		})
+	}
+
+	return results, nil
+}
+
+// queryCompressedFiles scans rotated history_YYYY-MM-DD.jsonl.gz files for
+// entries matching opts. Must be called with mu held.
+func queryCompressedFiles(cutoff time.Time, opts QueryOpts) []Entry {
+	dir := filepath.Dir(histPath)
+	dirEntries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil
+	}
+
+	var results []Entry
+	for _, de := range dirEntries {
+		if de.IsDir() {
+			continue
+		}
+		name := de.Name()
+		if !strings.HasPrefix(name, "history_") || !strings.HasSuffix(name, ".jsonl.gz") {
+			continue
+		}
+		// Parse the date embedded in the filename to skip obviously out-of-range files.
+		datePart := strings.TrimSuffix(strings.TrimPrefix(name, "history_"), ".jsonl.gz")
+		fileDate, err := time.Parse("2006-01-02", datePart)
+		if err != nil {
+			continue
+		}
+		// Entire day ended before the cutoff — nothing in this file is useful.
+		endOfDay := time.Date(fileDate.Year(), fileDate.Month(), fileDate.Day()+1, 0, 0, 0, 0, time.UTC)
+		if endOfDay.Before(cutoff) {
+			continue
+		}
+
+		f, err := os.Open(filepath.Join(dir, name))
+		if err != nil {
+			continue
+		}
+		gr, err := gzip.NewReader(f)
+		if err != nil {
+			f.Close()
+			continue
+		}
+		scanner := bufio.NewScanner(gr)
+		scanner.Buffer(make([]byte, 4*1024*1024), 4*1024*1024)
+		for scanner.Scan() {
+			var entry Entry
+			if err := json.Unmarshal(scanner.Bytes(), &entry); err != nil {
+				continue
+			}
+			if entry.Timestamp.Before(cutoff) {
+				continue
+			}
+			filtered := filterFlows(entry.Flows, opts)
+			if len(filtered) == 0 {
+				continue
+			}
+			entry.Flows = filtered
+			entry.FlowCount = len(filtered)
+			results = append(results, entry)
+		}
+		gr.Close()
+		f.Close()
+	}
+	return results
 }
 
 // buildIndex rebuilds the offsetIndex by scanning through the open history file.
@@ -256,9 +335,15 @@ func SetPathForTesting(path string) {
 
 // pruneOld rewrites the history file removing entries older than maxAge.
 // Also prunes to last 12 h when the file exceeds maxFileSize.
+// When CompressRotated is enabled, yesterday's entries are moved to a
+// per-day gzip file before pruning.
 func pruneOld() {
 	mu.Lock()
 	defer mu.Unlock()
+
+	// Rotate old entries into compressed daily files first, so they are
+	// preserved even after the hot file is trimmed.
+	rotateOldEntriesToGzip()
 
 	fi, err := os.Stat(histPath)
 	if err != nil {
@@ -316,4 +401,169 @@ func pruneOld() {
 	// The file has been rewritten — invalidate the offset index so the next
 	// Query rebuilds it from the new file.
 	offsetIndex = offsetIndex[:0]
+}
+
+// rotateOldEntriesToGzip moves entries from history.jsonl that are older than
+// the start of today UTC into per-day history_YYYY-MM-DD.jsonl.gz files.
+// Old compressed files beyond MaxRotatedDays are deleted.
+// Must be called with mu held.
+func rotateOldEntriesToGzip() {
+	hcfg := config.Get().History
+	if !hcfg.CompressRotated {
+		return
+	}
+
+	now := time.Now().UTC()
+	todayStart := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
+
+	f, err := os.Open(histPath)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			log.Printf("history: rotate open: %v", err)
+		}
+		return
+	}
+
+	// Partition entries: today stays in the hot file; older entries go to gzip.
+	var todayLines [][]byte
+	perDay := make(map[string][][]byte)
+	var orderedDays []string // insertion order for deterministic output
+
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 4*1024*1024), 4*1024*1024)
+	for scanner.Scan() {
+		raw := scanner.Bytes()
+		cp := make([]byte, len(raw))
+		copy(cp, raw)
+
+		var entry Entry
+		if err := json.Unmarshal(raw, &entry); err != nil || entry.Timestamp.IsZero() {
+			todayLines = append(todayLines, cp) // keep unparseable lines
+			continue
+		}
+		if entry.Timestamp.UTC().Before(todayStart) {
+			day := entry.Timestamp.UTC().Format("2006-01-02")
+			if _, ok := perDay[day]; !ok {
+				orderedDays = append(orderedDays, day)
+			}
+			perDay[day] = append(perDay[day], cp)
+		} else {
+			todayLines = append(todayLines, cp)
+		}
+	}
+	f.Close()
+
+	if len(perDay) == 0 {
+		return // nothing to rotate
+	}
+
+	dir := filepath.Dir(histPath)
+
+	// Merge each day's entries into its compressed file.
+	for _, day := range orderedDays {
+		gzPath := filepath.Join(dir, "history_"+day+".jsonl.gz")
+		if err := mergeIntoGzip(gzPath, perDay[day]); err != nil {
+			log.Printf("history: rotate write %s: %v", gzPath, err)
+			return // abort; leave hot file untouched
+		}
+	}
+
+	// Rewrite the hot file with today's entries only.
+	tmp, err := os.CreateTemp(dir, ".history-rotate-*")
+	if err != nil {
+		log.Printf("history: rotate create temp: %v", err)
+		return
+	}
+	bw := bufio.NewWriter(tmp)
+	for _, line := range todayLines {
+		bw.Write(line)
+		bw.WriteByte('\n')
+	}
+	bw.Flush()
+	tmp.Close()
+	if err := os.Rename(tmp.Name(), histPath); err != nil {
+		log.Printf("history: rotate rename: %v", err)
+		os.Remove(tmp.Name())
+		return
+	}
+	offsetIndex = offsetIndex[:0]
+
+	// Delete compressed files older than MaxRotatedDays.
+	if hcfg.MaxRotatedDays > 0 {
+		purgeCutoff := now.AddDate(0, 0, -hcfg.MaxRotatedDays)
+		des, _ := os.ReadDir(dir)
+		for _, de := range des {
+			if de.IsDir() {
+				continue
+			}
+			name := de.Name()
+			if !strings.HasPrefix(name, "history_") || !strings.HasSuffix(name, ".jsonl.gz") {
+				continue
+			}
+			datePart := strings.TrimSuffix(strings.TrimPrefix(name, "history_"), ".jsonl.gz")
+			t, err := time.Parse("2006-01-02", datePart)
+			if err != nil {
+				continue
+			}
+			if t.Before(purgeCutoff) {
+				os.Remove(filepath.Join(dir, name))
+			}
+		}
+	}
+}
+
+// mergeIntoGzip reads any existing lines from a gzip file, appends newLines,
+// and atomically rewrites the file. This ensures idempotent daily rotation.
+func mergeIntoGzip(path string, newLines [][]byte) error {
+	var existing [][]byte
+	if ef, err := os.Open(path); err == nil {
+		gr, gerr := gzip.NewReader(ef)
+		if gerr == nil {
+			scanner := bufio.NewScanner(gr)
+			scanner.Buffer(make([]byte, 4*1024*1024), 4*1024*1024)
+			for scanner.Scan() {
+				raw := scanner.Bytes()
+				cp := make([]byte, len(raw))
+				copy(cp, raw)
+				existing = append(existing, cp)
+			}
+			gr.Close()
+		}
+		ef.Close()
+	}
+
+	all := append(existing, newLines...)
+
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".history-gz-*")
+	if err != nil {
+		return fmt.Errorf("create temp: %w", err)
+	}
+	gz, err := gzip.NewWriterLevel(tmp, gzip.BestCompression)
+	if err != nil {
+		tmp.Close()
+		os.Remove(tmp.Name())
+		return fmt.Errorf("gzip writer: %w", err)
+	}
+	bw := bufio.NewWriter(gz)
+	for _, line := range all {
+		bw.Write(line)
+		bw.WriteByte('\n')
+	}
+	if err := bw.Flush(); err != nil {
+		gz.Close()
+		tmp.Close()
+		os.Remove(tmp.Name())
+		return fmt.Errorf("flush: %w", err)
+	}
+	if err := gz.Close(); err != nil {
+		tmp.Close()
+		os.Remove(tmp.Name())
+		return fmt.Errorf("gzip close: %w", err)
+	}
+	tmp.Close()
+	if err := os.Rename(tmp.Name(), path); err != nil {
+		os.Remove(tmp.Name())
+		return fmt.Errorf("rename: %w", err)
+	}
+	return nil
 }
