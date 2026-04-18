@@ -915,3 +915,231 @@ func TestBuildProcessReport_WithHistoryFlows(t *testing.T) {
 		t.Errorf("HistoryFlowCount = 0; expected > 0 after injecting a matching history entry (process %q)", name)
 	}
 }
+
+// ─── scan_process helpers ─────────────────────────────────────────────────────
+
+func TestHashFile_ValidFile(t *testing.T) {
+	tmp := filepath.Join(t.TempDir(), "test.bin")
+	if err := os.WriteFile(tmp, []byte("hello world"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	hash, size, err := hashFile(tmp)
+	if err != nil {
+		t.Fatalf("hashFile: %v", err)
+	}
+	// sha256("hello world") = b94d27b9934d3e08a52e52d7da7dabfac484efe04294e576e8...
+	if len(hash) != 64 {
+		t.Errorf("expected 64-char hex hash, got %d chars: %q", len(hash), hash)
+	}
+	if size != 11 {
+		t.Errorf("expected size=11, got %d", size)
+	}
+}
+
+func TestHashFile_NonExistent_ReturnsError(t *testing.T) {
+	_, _, err := hashFile(filepath.Join(t.TempDir(), "nonexistent"))
+	if err == nil {
+		t.Error("expected error for nonexistent file")
+	}
+}
+
+func TestIsSystemPath(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		if !isSystemPath(`C:\Windows\System32\notepad.exe`) {
+			t.Error("expected C:\\Windows\\... to be a system path")
+		}
+		if isSystemPath(`C:\Users\user\Downloads\malware.exe`) {
+			t.Error("expected Downloads path to NOT be a system path")
+		}
+	} else {
+		if !isSystemPath("/usr/bin/python3") {
+			t.Error("expected /usr/bin/ to be a system path")
+		}
+		if !isSystemPath("/bin/sh") {
+			t.Error("expected /bin/ to be a system path")
+		}
+		if isSystemPath("/home/user/backdoor") {
+			t.Error("expected /home/ to NOT be a system path")
+		}
+		if isSystemPath("/tmp/evil") {
+			t.Error("expected /tmp/ to NOT be a system path")
+		}
+	}
+}
+
+func TestDeriveSuspiciousSignals_SuspiciousPath(t *testing.T) {
+	r := scanReport{
+		BinaryPath: "/tmp/evil_shell",
+		SHA256:     "abc123",
+	}
+	signals := deriveSuspiciousSignals(r)
+	found := false
+	for _, s := range signals {
+		if strings.Contains(s, "binary_in_suspicious_path") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected binary_in_suspicious_path signal, got: %v", signals)
+	}
+}
+
+func TestDeriveSuspiciousSignals_VTPositive(t *testing.T) {
+	r := scanReport{
+		BinaryPath:   "/usr/bin/legit",
+		SHA256:       "abc123",
+		VTDetections: 5,
+		VTTotal:      70,
+	}
+	signals := deriveSuspiciousSignals(r)
+	found := false
+	for _, s := range signals {
+		if strings.Contains(s, "vt_positive") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected vt_positive signal, got: %v", signals)
+	}
+}
+
+func TestDeriveSuspiciousSignals_NoBinaryPath(t *testing.T) {
+	r := scanReport{BinaryPath: ""}
+	signals := deriveSuspiciousSignals(r)
+	found := false
+	for _, s := range signals {
+		if strings.Contains(s, "binary_path_unavailable") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected binary_path_unavailable signal, got: %v", signals)
+	}
+}
+
+func TestDeriveSuspiciousSignals_CleanBinary_NoSignals(t *testing.T) {
+	var systemBin string
+	if runtime.GOOS == "windows" {
+		systemBin = `C:\Windows\System32\notepad.exe`
+	} else {
+		systemBin = "/usr/bin/python3"
+	}
+	r := scanReport{
+		BinaryPath:   systemBin,
+		SHA256:       "abc123",
+		VTDetections: 0,
+		VTTotal:      70,
+	}
+	signals := deriveSuspiciousSignals(r)
+	if len(signals) != 0 {
+		t.Errorf("expected no suspicious signals for clean binary, got: %v", signals)
+	}
+}
+
+// ─── scan_process MCP handler ─────────────────────────────────────────────────
+
+func TestScanProcessHandler_CurrentProcess(t *testing.T) {
+	s := server.NewMCPServer("test", "0.0.0.1")
+	registerScanProcess(s)
+
+	pid := float64(os.Getpid())
+	req := mcp.CallToolRequest{}
+	req.Params.Arguments = map[string]any{"pid": pid}
+
+	result, err := scanProcessHandler(context.Background(), req)
+	if err != nil {
+		t.Fatalf("scanProcessHandler: %v", err)
+	}
+	if result == nil {
+		t.Fatal("expected non-nil result")
+	}
+	text := resultText(t, result)
+
+	type response struct {
+		ProcessesFound int          `json:"processes_found"`
+		Processes      []scanReport `json:"processes"`
+	}
+	var resp response
+	if err := json.Unmarshal([]byte(text), &resp); err != nil {
+		t.Fatalf("unmarshal: %v — raw: %s", err, text)
+	}
+	if resp.ProcessesFound == 0 {
+		t.Fatal("expected at least 1 process in scan result")
+	}
+	p := resp.Processes[0]
+	if p.PID != int32(pid) {
+		t.Errorf("PID=%d, want %d", p.PID, int32(pid))
+	}
+	if p.SHA256 == "" && p.SHA256Error == "" {
+		t.Error("expected either SHA256 or SHA256Error to be set")
+	}
+}
+
+func TestScanProcessHandler_NoPIDOrName_ReturnsError(t *testing.T) {
+	req := mcp.CallToolRequest{}
+	req.Params.Arguments = map[string]any{}
+	result, err := scanProcessHandler(context.Background(), req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	text := resultText(t, result)
+	if !strings.Contains(text, "provide") {
+		t.Errorf("expected error about missing params, got: %s", text)
+	}
+}
+
+func TestScanProcessHandler_NotFound_ReturnsError(t *testing.T) {
+	req := mcp.CallToolRequest{}
+	req.Params.Arguments = map[string]any{"process_name": "zzz_nonexistent_process_xyz_12345"}
+	result, _ := scanProcessHandler(context.Background(), req)
+	text := resultText(t, result)
+	if !strings.Contains(text, "no process found") {
+		t.Errorf("expected 'no process found', got: %s", text)
+	}
+}
+
+// ─── live_watch handler (no-capture path) ────────────────────────────────────
+
+func TestLiveWatchHandler_MissingInterface_ReturnsError(t *testing.T) {
+	req := mcp.CallToolRequest{}
+	req.Params.Arguments = map[string]any{
+		"process_name": "test",
+	}
+	result, err := liveWatchHandler(context.Background(), req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	text := resultText(t, result)
+	if !strings.Contains(text, "interface") {
+		t.Errorf("expected interface error, got: %s", text)
+	}
+}
+
+func TestLiveWatchHandler_MissingFilter_ReturnsError(t *testing.T) {
+	req := mcp.CallToolRequest{}
+	req.Params.Arguments = map[string]any{
+		"interface": "eth0",
+		// no process_name or target_ip
+	}
+	result, err := liveWatchHandler(context.Background(), req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	text := resultText(t, result)
+	if !strings.Contains(text, "process_name") || !strings.Contains(text, "target_ip") {
+		t.Errorf("expected filter requirement error, got: %s", text)
+	}
+}
+
+func TestLiveWatchHandler_InvalidInterface_ReturnsError(t *testing.T) {
+	req := mcp.CallToolRequest{}
+	req.Params.Arguments = map[string]any{
+		"interface":    "../../etc/passwd",
+		"process_name": "test",
+	}
+	result, _ := liveWatchHandler(context.Background(), req)
+	text := resultText(t, result)
+	if !strings.Contains(text, "invalid interface") {
+		t.Errorf("expected invalid interface error, got: %s", text)
+	}
+}

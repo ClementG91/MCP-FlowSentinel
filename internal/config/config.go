@@ -28,6 +28,7 @@ type Config struct {
 	Daemon   DaemonConfig   `yaml:"daemon"`
 	JA3Feed  JA3FeedConfig  `yaml:"ja3_feed"`
 	Metrics  MetricsConfig  `yaml:"metrics"`
+	Intel    IntelConfig    `yaml:"intel"`
 }
 
 // ScoringConfig controls every detection-engine threshold.
@@ -174,6 +175,13 @@ type JA3FeedConfig struct {
 	// LocalFile is an optional path to a local CSV file in the same format.
 	// Entries from this file take priority over remote feeds.
 	LocalFile string `yaml:"local_file"`
+}
+
+// IntelConfig holds external threat-intelligence API keys and settings.
+type IntelConfig struct {
+	// VirusTotalAPIKey enables VirusTotal file reputation lookups in scan_process.
+	// When empty, VT lookups are skipped. Get a free key at virustotal.com.
+	VirusTotalAPIKey string `yaml:"virustotal_api_key"`
 }
 
 // MetricsConfig controls the optional Prometheus metrics endpoint.
@@ -494,6 +502,10 @@ func mergeOverDefaults(dst, override *Config) {
 	}
 	if om.ListenAddr != "" {
 		m.ListenAddr = om.ListenAddr
+	}
+
+	if override.Intel.VirusTotalAPIKey != "" {
+		dst.Intel.VirusTotalAPIKey = override.Intel.VirusTotalAPIKey
 	}
 }
 

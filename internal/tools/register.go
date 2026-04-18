@@ -15,4 +15,6 @@ func Register(s *server.MCPServer) {
 	registerGetDaemonStats(s)
 	registerGetAlerts(s)
 	registerReloadConfig(s)
+	registerScanProcess(s)
+	registerLiveWatch(s)
 }
