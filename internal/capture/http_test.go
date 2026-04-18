@@ -192,6 +192,75 @@ func TestIsHighEntropyURI_TooShort(t *testing.T) {
 	}
 }
 
+// ─── IsGRPCFrames ─────────────────────────────────────────────────────────────
+
+func buildGRPCFrame(compFlag byte, data []byte) []byte {
+	frame := make([]byte, 5+len(data))
+	frame[0] = compFlag
+	frame[1] = byte(len(data) >> 24)
+	frame[2] = byte(len(data) >> 16)
+	frame[3] = byte(len(data) >> 8)
+	frame[4] = byte(len(data))
+	copy(frame[5:], data)
+	return frame
+}
+
+func TestIsGRPCFrames_TwoFrames(t *testing.T) {
+	f1 := buildGRPCFrame(0, []byte{0x0A, 0x05, 'h', 'e', 'l', 'l', 'o'})
+	f2 := buildGRPCFrame(0, []byte{0x0A, 0x05, 'w', 'o', 'r', 'l', 'd'})
+	payload := append(f1, f2...)
+	if !IsGRPCFrames(payload) {
+		t.Error("expected 2 valid gRPC frames to be detected")
+	}
+}
+
+func TestIsGRPCFrames_CompressedFrame(t *testing.T) {
+	f1 := buildGRPCFrame(1, []byte{0x01, 0x02, 0x03})
+	f2 := buildGRPCFrame(0, []byte{0x04, 0x05, 0x06})
+	payload := append(f1, f2...)
+	if !IsGRPCFrames(payload) {
+		t.Error("expected compressed-flag=1 frames to be accepted")
+	}
+}
+
+func TestIsGRPCFrames_SingleFrame_NotDetected(t *testing.T) {
+	f1 := buildGRPCFrame(0, []byte{0x01, 0x02})
+	if IsGRPCFrames(f1) {
+		t.Error("single frame should not be flagged (requires 2+)")
+	}
+}
+
+func TestIsGRPCFrames_InvalidCompressFlag_NotDetected(t *testing.T) {
+	// compress flag = 2 is invalid per gRPC spec.
+	payload := []byte{0x02, 0x00, 0x00, 0x00, 0x03, 0x01, 0x02, 0x03}
+	if IsGRPCFrames(payload) {
+		t.Error("invalid compress flag (>1) should reject the payload")
+	}
+}
+
+func TestIsGRPCFrames_OversizedMessage_NotDetected(t *testing.T) {
+	// Message length = 17 MB > 16 MB limit.
+	payload := []byte{0x00, 0x01, 0x10, 0x00, 0x01}
+	if IsGRPCFrames(payload) {
+		t.Error("message length >16 MB should be rejected")
+	}
+}
+
+func TestIsGRPCFrames_TooShort_NotDetected(t *testing.T) {
+	if IsGRPCFrames([]byte{0x00, 0x00, 0x00}) {
+		t.Error("payload shorter than 5 bytes should not match")
+	}
+}
+
+func TestIsGRPCFrames_EmptyPayload_NotDetected(t *testing.T) {
+	if IsGRPCFrames(nil) {
+		t.Error("nil payload should not match")
+	}
+	if IsGRPCFrames([]byte{}) {
+		t.Error("empty payload should not match")
+	}
+}
+
 // ─── IsStandardHTTPPort ───────────────────────────────────────────────────────
 
 func TestIsStandardHTTPPort(t *testing.T) {

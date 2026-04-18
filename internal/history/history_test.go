@@ -531,3 +531,54 @@ func TestQuery_OpenError_NotIsNotExist_ReturnsError(t *testing.T) {
 		t.Logf("OS did not reject invalid path (treated as absent, entries=%d)", len(entries))
 	}
 }
+
+// ─── Schema versioning ────────────────────────────────────────────────────────
+
+func TestAppend_SetsCurrentSchemaVersion(t *testing.T) {
+	setup(t)
+	flow := makeFlow("1.2.3.4", "5.6.7.8", "proc", 5.0)
+	Append("test", []aggregate.FlowRecord{flow})
+
+	// Read the raw JSONL to verify the "v" field is set.
+	mu.Lock()
+	b, err := os.ReadFile(histPath)
+	mu.Unlock()
+	if err != nil {
+		t.Fatalf("read history file: %v", err)
+	}
+	var e Entry
+	if err := json.Unmarshal(b[:len(b)-1], &e); err != nil {
+		t.Fatalf("unmarshal entry: %v", err)
+	}
+	if e.SchemaVersion != currentSchemaVersion {
+		t.Errorf("SchemaVersion=%d, want %d", e.SchemaVersion, currentSchemaVersion)
+	}
+}
+
+func TestQuery_LegacyEntries_BackwardCompat(t *testing.T) {
+	// Entries written before schema versioning have v=0 (JSON zero value / omitempty).
+	// They must be readable without error.
+	setup(t)
+	legacy := Entry{
+		// SchemaVersion intentionally omitted (zero value → omitted via omitempty).
+		Timestamp: time.Now().UTC(),
+		Source:    "legacy",
+		FlowCount: 1,
+		Flows:     []aggregate.FlowRecord{makeFlow("10.0.0.1", "10.0.0.2", "old", 3.0)},
+	}
+	injectEntry(t, legacy)
+
+	entries, err := Query(QueryOpts{MaxAge: time.Hour})
+	if err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 entry, got %d", len(entries))
+	}
+	if entries[0].SchemaVersion != 0 {
+		t.Errorf("legacy entry SchemaVersion should be 0, got %d", entries[0].SchemaVersion)
+	}
+	if len(entries[0].Flows) != 1 {
+		t.Errorf("expected 1 flow in legacy entry, got %d", len(entries[0].Flows))
+	}
+}

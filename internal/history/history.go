@@ -21,12 +21,18 @@ import (
 
 const pruneEvery = 5 // run pruneOld after every N appends
 
+// currentSchemaVersion is incremented whenever the Entry or FlowRecord schema
+// changes in a backward-incompatible way. Readers treat v=0 (missing field) as
+// a legacy entry written before schema versioning was introduced.
+const currentSchemaVersion = 1
+
 // Entry is one history record: a batch of flows from a single capture session.
 type Entry struct {
-	Timestamp time.Time              `json:"timestamp"`
-	Source    string                 `json:"source"` // e.g. "live:eth0" or "pcap:/path/to/file"
-	FlowCount int                    `json:"flow_count"`
-	Flows     []aggregate.FlowRecord `json:"flows"`
+	SchemaVersion int                    `json:"v,omitempty"` // 0 = legacy (pre-versioning), 1 = current
+	Timestamp     time.Time              `json:"timestamp"`
+	Source        string                 `json:"source"` // e.g. "live:eth0" or "pcap:/path/to/file"
+	FlowCount     int                    `json:"flow_count"`
+	Flows         []aggregate.FlowRecord `json:"flows"`
 }
 
 // QueryOpts controls what history.Query returns.
@@ -78,10 +84,11 @@ func Append(source string, flows []aggregate.FlowRecord) {
 	}
 
 	entry := Entry{
-		Timestamp: time.Now().UTC(),
-		Source:    source,
-		FlowCount: len(flows),
-		Flows:     flows,
+		SchemaVersion: currentSchemaVersion,
+		Timestamp:     time.Now().UTC(),
+		Source:        source,
+		FlowCount:     len(flows),
+		Flows:         flows,
 	}
 
 	data, err := json.Marshal(entry)

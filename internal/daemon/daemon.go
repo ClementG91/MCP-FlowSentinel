@@ -226,6 +226,7 @@ func runWindow(ctx context.Context, ifaces []string, bpfFilter string, dur time.
 					JA3Hash:       pkt.JA3Hash,
 					IsQUIC:        pkt.IsQUIC,
 					IsHTTP2:       pkt.IsHTTP2,
+					IsGRPC:        pkt.IsGRPC,
 					DNSNXDomain:   pkt.DNSNXDomain,
 					DNSMinRespTTL: pkt.DNSMinRespTTL,
 					HTTPMethod:    pkt.HTTPMethod,

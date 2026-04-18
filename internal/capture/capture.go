@@ -46,6 +46,7 @@ type PacketEvent struct {
 	HTTPUserAgent string // HTTP User-Agent header value
 	HTTPURI       string // HTTP request URI (first 256 chars)
 	IsHTTP2       bool   // true when payload starts with the HTTP/2 client preface
+	IsGRPC        bool   // true when 2+ consecutive gRPC Length-Prefixed Message frames detected
 	// TLS server certificate (TCP 443 only, from ServerCertificate message).
 	TLSCertInfo *CertInfo // non-nil when a server certificate was successfully parsed
 }
@@ -222,6 +223,13 @@ func parsePacket(pkt gopacket.Packet) *PacketEvent {
 		// HTTP/2 preface detection.
 		if IsHTTP2Preface(tcpPayload) {
 			event.IsHTTP2 = true
+			// gRPC frames appear after the HTTP/2 preface (24 bytes) in the same segment.
+			if IsGRPCFrames(tcpPayload[24:]) {
+				event.IsGRPC = true
+			}
+		} else if IsGRPCFrames(tcpPayload) {
+			// gRPC on a mid-stream TCP segment (preface already exchanged earlier).
+			event.IsGRPC = true
 		}
 
 		// HTTP/1.1 parsing (only when payload is not TLS — TLS records start 0x16).

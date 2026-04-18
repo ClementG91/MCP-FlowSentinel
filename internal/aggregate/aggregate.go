@@ -142,6 +142,7 @@ type FlowRecord struct {
 	// QUIC / transport enrichment
 	IsQUIC  bool `json:"is_quic,omitempty"`  // true when at least one QUIC Initial packet was observed
 	IsHTTP2 bool `json:"is_http2,omitempty"` // true when HTTP/2 client preface was observed
+	IsGRPC  bool `json:"is_grpc,omitempty"`  // true when gRPC Length-Prefixed Message frames detected
 	// DNS response analysis
 	NXDomainCount int    `json:"nxdomain_count,omitempty"` // number of NXDOMAIN responses in this flow
 	MinDNSTTL     uint32 `json:"min_dns_ttl,omitempty"`    // minimum A/AAAA TTL observed (0 = no answers)
@@ -193,6 +194,7 @@ type flowState struct {
 	httpUserAgent string
 	httpURI       string
 	isHTTP2       bool
+	isGRPC        bool
 	// TLS server certificate — first parsed cert wins.
 	tlsCertInfo *capture.CertInfo
 }
@@ -225,6 +227,7 @@ type PacketEvent struct {
 	HTTPUserAgent string
 	HTTPURI       string
 	IsHTTP2       bool
+	IsGRPC        bool
 	// TLS server certificate anomalies.
 	TLSCertInfo *capture.CertInfo
 }
@@ -273,6 +276,9 @@ func (a *Aggregator) Add(pkt PacketEvent) {
 	}
 	if pkt.IsHTTP2 {
 		fs.isHTTP2 = true
+	}
+	if pkt.IsGRPC {
+		fs.isGRPC = true
 	}
 	if pkt.DNSNXDomain {
 		fs.nxdomainCount++
@@ -335,6 +341,7 @@ func (a *Aggregator) Finalize(resolver ProcessResolver) []FlowRecord {
 		ja3h := fs.ja3Hash
 		isQUIC := fs.isQUIC
 		isHTTP2 := fs.isHTTP2
+		isGRPC := fs.isGRPC
 		nxdomainCount := fs.nxdomainCount
 		minDNSTTL := fs.minDNSTTL
 		httpMethod := fs.httpMethod
@@ -357,6 +364,7 @@ func (a *Aggregator) Finalize(resolver ProcessResolver) []FlowRecord {
 			JA3Hash:       ja3h,
 			IsQUIC:        isQUIC,
 			IsHTTP2:       isHTTP2,
+			IsGRPC:        isGRPC,
 			NXDomainCount: nxdomainCount,
 			MinDNSTTL:     minDNSTTL,
 			HTTPMethod:    httpMethod,
@@ -827,6 +835,17 @@ func score(key FlowKey, rec FlowRecord, ts []time.Time) (float64, []string) {
 	// ── HTTP/2 on non-standard port ──────────────────────────────────────────
 	if !cfg.DisableHTTPScoring && rec.IsHTTP2 && key.DstPort != 443 && key.DstPort != 8443 {
 		add(1.5, fmt.Sprintf("HTTP/2 on non-standard port %d — potential C2 (e.g. Sliver gRPC)", key.DstPort))
+	}
+	// ── gRPC frame pattern ───────────────────────────────────────────────────
+	if !cfg.DisableHTTPScoring && rec.IsGRPC {
+		// Informational: gRPC itself is not malicious, but combined with a
+		// non-standard port or no TLS (IsHTTP2 on port != 443) it deserves a
+		// bump so the flow surfaces in results.
+		if key.DstPort != 443 && key.DstPort != 8443 {
+			add(1.0, fmt.Sprintf("gRPC traffic on non-standard port %d — verify expected service", key.DstPort))
+		} else {
+			add(0.5, "gRPC traffic detected (informational)")
+		}
 	}
 
 	// ── TLS certificate anomalies ────────────────────────────────────────────

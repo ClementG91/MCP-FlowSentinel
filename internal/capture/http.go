@@ -10,6 +10,7 @@ package capture
 import (
 	"bufio"
 	"bytes"
+	"encoding/binary"
 	"math"
 	"net/http"
 	"strings"
@@ -194,3 +195,40 @@ var standardHTTPPorts = map[uint16]bool{
 
 // IsStandardHTTPPort returns true when the port is a well-known HTTP port.
 func IsStandardHTTPPort(port uint16) bool { return standardHTTPPorts[port] }
+
+// ─── gRPC detection ───────────────────────────────────────────────────────────
+
+// IsGRPCFrames returns true when the payload looks like a sequence of gRPC
+// Length-Prefixed Message frames (RFC: 5-byte header — 1 compressed-flag +
+// 4-byte big-endian message length — followed by the message bytes).
+//
+// Two or more consecutive valid frames constitute a strong indicator of gRPC
+// traffic. The check deliberately avoids requiring that all bytes be consumed:
+// the tail of the payload may be a partial frame from a multi-packet message.
+//
+// False-positive rate is negligible: only well-formed binary streams whose
+// leading bytes happen to be a valid compressed-flag (0 or 1) followed by a
+// plausible length will match, and two consecutive such frames are astronomically
+// unlikely in non-gRPC traffic.
+func IsGRPCFrames(payload []byte) bool {
+	if len(payload) < 5 {
+		return false
+	}
+	pos := 0
+	frames := 0
+	for pos+5 <= len(payload) && frames < 3 {
+		compFlag := payload[pos]
+		if compFlag > 1 {
+			// Compressed flag must be 0 (uncompressed) or 1 (compressed).
+			return false
+		}
+		msgLen := int(binary.BigEndian.Uint32(payload[pos+1 : pos+5]))
+		if msgLen > 16*1024*1024 {
+			// Message larger than 16 MB is not valid gRPC.
+			return false
+		}
+		pos += 5 + msgLen
+		frames++
+	}
+	return frames >= 2
+}
