@@ -1198,3 +1198,87 @@ func TestFinalize_AsymmetricUpload_AddsReason(t *testing.T) {
 		t.Error("expected 'asymmetric upload' reason when upload >> download")
 	}
 }
+
+// ─── IPv6 extension header scoring ───────────────────────────────────────────
+
+func baseIPv6Flow() PacketEvent {
+	return PacketEvent{
+		SrcIP:     net.ParseIP("2001:db8::1"),
+		DstIP:     net.ParseIP("2001:db8::2"),
+		SrcPort:   50000,
+		DstPort:   443,
+		Proto:     "TCP",
+		PayloadLen: 100,
+		Timestamp: time.Now(),
+	}
+}
+
+func TestScore_IPv6RH0_RaisesScore(t *testing.T) {
+	agg := &Aggregator{}
+	pkt := baseIPv6Flow()
+	pkt.IsIPv6RH0 = true
+	agg.Add(pkt)
+
+	records := agg.Finalize(nil)
+	if len(records) == 0 {
+		t.Fatal("expected at least one flow record")
+	}
+	rec := records[0]
+	if !rec.IsIPv6RH0 {
+		t.Error("expected IsIPv6RH0=true in FlowRecord")
+	}
+	found := false
+	for _, r := range rec.SuspicionReasons {
+		if strings.Contains(r, "Routing Header type 0") {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("expected RH0 reason in SuspicionReasons")
+	}
+	if rec.SuspicionScore < 1.5 {
+		t.Errorf("expected score >= 1.5 for RH0, got %.2f", rec.SuspicionScore)
+	}
+}
+
+func TestScore_IPv6Fragment_RaisesScore(t *testing.T) {
+	agg := &Aggregator{}
+	pkt := baseIPv6Flow()
+	pkt.IsIPv6Fragment = true
+	agg.Add(pkt)
+
+	records := agg.Finalize(nil)
+	if len(records) == 0 {
+		t.Fatal("expected at least one flow record")
+	}
+	rec := records[0]
+	if !rec.IsIPv6Fragment {
+		t.Error("expected IsIPv6Fragment=true in FlowRecord")
+	}
+	found := false
+	for _, r := range rec.SuspicionReasons {
+		if strings.Contains(r, "fragmentation") {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("expected fragmentation reason in SuspicionReasons")
+	}
+}
+
+func TestScore_IPv6RH0AndFragment_Combined(t *testing.T) {
+	agg := &Aggregator{}
+	pkt := baseIPv6Flow()
+	pkt.IsIPv6RH0 = true
+	pkt.IsIPv6Fragment = true
+	agg.Add(pkt)
+
+	records := agg.Finalize(nil)
+	if len(records) == 0 {
+		t.Fatal("expected at least one flow record")
+	}
+	rec := records[0]
+	if rec.SuspicionScore < 2.0 {
+		t.Errorf("expected score >= 2.0 for RH0+fragment combination, got %.2f", rec.SuspicionScore)
+	}
+}

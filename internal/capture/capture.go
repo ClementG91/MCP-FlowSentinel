@@ -47,6 +47,9 @@ type PacketEvent struct {
 	HTTPURI       string // HTTP request URI (first 256 chars)
 	IsHTTP2       bool   // true when payload starts with the HTTP/2 client preface
 	IsGRPC        bool   // true when 2+ consecutive gRPC Length-Prefixed Message frames detected
+	// IPv6 extension header anomalies.
+	IsIPv6RH0      bool // true when an IPv6 Routing Header type 0 was observed (deprecated, RFC 5095)
+	IsIPv6Fragment bool // true when an IPv6 Fragment Header was observed
 	// TLS server certificate (TCP 443 only, from ServerCertificate message).
 	TLSCertInfo *CertInfo // non-nil when a server certificate was successfully parsed
 }
@@ -246,6 +249,18 @@ func parsePacket(pkt gopacket.Packet) *PacketEvent {
 	// QUIC detection — UDP 443 with a QUIC Initial packet long-header.
 	if proto == "UDP" && (srcPort == 443 || dstPort == 443) {
 		event.IsQUIC = isQUICInitial(tcpPayload)
+	}
+
+	// IPv6 extension headers — only present on IPv6 packets.
+	// Routing Header type 0 (RH0) was deprecated by RFC 5095 due to source-routing
+	// amplification attacks; its presence in modern traffic is anomalous.
+	if rhLayer := pkt.Layer(layers.LayerTypeIPv6Routing); rhLayer != nil {
+		if rh, ok := rhLayer.(*layers.IPv6Routing); ok && rh.RoutingType == 0 {
+			event.IsIPv6RH0 = true
+		}
+	}
+	if pkt.Layer(layers.LayerTypeIPv6Fragment) != nil {
+		event.IsIPv6Fragment = true
 	}
 
 	return event

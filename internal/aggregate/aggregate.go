@@ -143,6 +143,9 @@ type FlowRecord struct {
 	IsQUIC  bool `json:"is_quic,omitempty"`  // true when at least one QUIC Initial packet was observed
 	IsHTTP2 bool `json:"is_http2,omitempty"` // true when HTTP/2 client preface was observed
 	IsGRPC  bool `json:"is_grpc,omitempty"`  // true when gRPC Length-Prefixed Message frames detected
+	// IPv6 extension header anomalies.
+	IsIPv6RH0      bool `json:"is_ipv6_rh0,omitempty"`      // IPv6 Routing Header type 0 (deprecated, RFC 5095)
+	IsIPv6Fragment bool `json:"is_ipv6_fragment,omitempty"` // IPv6 Fragment Header present
 	// DNS response analysis
 	NXDomainCount int    `json:"nxdomain_count,omitempty"` // number of NXDOMAIN responses in this flow
 	MinDNSTTL     uint32 `json:"min_dns_ttl,omitempty"`    // minimum A/AAAA TTL observed (0 = no answers)
@@ -193,8 +196,10 @@ type flowState struct {
 	httpHost      string
 	httpUserAgent string
 	httpURI       string
-	isHTTP2       bool
-	isGRPC        bool
+	isHTTP2        bool
+	isGRPC         bool
+	isIPv6RH0      bool
+	isIPv6Fragment bool
 	// TLS server certificate — first parsed cert wins.
 	tlsCertInfo *capture.CertInfo
 }
@@ -226,8 +231,10 @@ type PacketEvent struct {
 	HTTPHost      string
 	HTTPUserAgent string
 	HTTPURI       string
-	IsHTTP2       bool
-	IsGRPC        bool
+	IsHTTP2        bool
+	IsGRPC         bool
+	IsIPv6RH0      bool
+	IsIPv6Fragment bool
 	// TLS server certificate anomalies.
 	TLSCertInfo *capture.CertInfo
 }
@@ -279,6 +286,12 @@ func (a *Aggregator) Add(pkt PacketEvent) {
 	}
 	if pkt.IsGRPC {
 		fs.isGRPC = true
+	}
+	if pkt.IsIPv6RH0 {
+		fs.isIPv6RH0 = true
+	}
+	if pkt.IsIPv6Fragment {
+		fs.isIPv6Fragment = true
 	}
 	if pkt.DNSNXDomain {
 		fs.nxdomainCount++
@@ -342,6 +355,8 @@ func (a *Aggregator) Finalize(resolver ProcessResolver) []FlowRecord {
 		isQUIC := fs.isQUIC
 		isHTTP2 := fs.isHTTP2
 		isGRPC := fs.isGRPC
+		isIPv6RH0 := fs.isIPv6RH0
+		isIPv6Fragment := fs.isIPv6Fragment
 		nxdomainCount := fs.nxdomainCount
 		minDNSTTL := fs.minDNSTTL
 		httpMethod := fs.httpMethod
@@ -362,9 +377,11 @@ func (a *Aggregator) Finalize(resolver ProcessResolver) []FlowRecord {
 			DNSQueries:    dnsSlice,
 			TLSSNIName:    sniName,
 			JA3Hash:       ja3h,
-			IsQUIC:        isQUIC,
-			IsHTTP2:       isHTTP2,
-			IsGRPC:        isGRPC,
+			IsQUIC:         isQUIC,
+			IsHTTP2:        isHTTP2,
+			IsGRPC:         isGRPC,
+			IsIPv6RH0:      isIPv6RH0,
+			IsIPv6Fragment: isIPv6Fragment,
 			NXDomainCount: nxdomainCount,
 			MinDNSTTL:     minDNSTTL,
 			HTTPMethod:    httpMethod,
@@ -846,6 +863,18 @@ func score(key FlowKey, rec FlowRecord, ts []time.Time) (float64, []string) {
 		} else {
 			add(0.5, "gRPC traffic detected (informational)")
 		}
+	}
+
+	// ── IPv6 extension header anomalies ─────────────────────────────────────
+	// Routing Header type 0 was deprecated by RFC 5095 (2007) as it allows
+	// source-routing amplification attacks; legitimate stacks never send it.
+	if rec.IsIPv6RH0 {
+		add(1.5, "IPv6 Routing Header type 0 (deprecated per RFC 5095) — potential source-routing abuse")
+	}
+	// IPv6 fragmentation on its own is not malicious but warrants logging as
+	// fragmented ClientHellos evade JA3 fingerprinting.
+	if rec.IsIPv6Fragment {
+		add(0.5, "IPv6 fragmentation detected — possible JA3 evasion or reassembly-based bypass")
 	}
 
 	// ── TLS certificate anomalies ────────────────────────────────────────────
