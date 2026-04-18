@@ -78,3 +78,39 @@ func TestHasFlag_EmptySlice(t *testing.T) {
 		t.Error("hasFlag(nil) should return false")
 	}
 }
+
+// ─── Multi-interface helpers ──────────────────────────────────────────────────
+
+func TestResolveInterfaces_ListTakesPriority(t *testing.T) {
+	// When Interfaces is set, it wins over Interface.
+	ifaces := resolveInterfaces("eth0", []string{"eth1", "eth2"})
+	if len(ifaces) != 2 || ifaces[0] != "eth1" || ifaces[1] != "eth2" {
+		t.Errorf("expected [eth1 eth2], got %v", ifaces)
+	}
+}
+
+func TestResolveInterfaces_FallsBackToSingle(t *testing.T) {
+	// When Interfaces is empty, Interface is used.
+	ifaces := resolveInterfaces("eth0", nil)
+	if len(ifaces) != 1 || ifaces[0] != "eth0" {
+		t.Errorf("expected [eth0], got %v", ifaces)
+	}
+}
+
+func TestResolveInterfaces_BothEmpty(t *testing.T) {
+	// Both empty → auto-select path (returns nil for auto-selection).
+	ifaces := resolveInterfaces("", nil)
+	if len(ifaces) != 0 {
+		t.Errorf("expected empty slice, got %v", ifaces)
+	}
+}
+
+// ─── GetStats ─────────────────────────────────────────────────────────────────
+
+func TestGetStats_NotRunning(t *testing.T) {
+	running.Store(false)
+	s := GetStats()
+	if s.Running {
+		t.Error("expected Running=false when daemon is not started")
+	}
+}

@@ -418,6 +418,182 @@ func TestWebhookRetry_EventualSuccess(t *testing.T) {
 	}
 }
 
+// ─── Rate limiter ─────────────────────────────────────────────────────────────
+
+func TestRateLimiter_AllowsUpToMax(t *testing.T) {
+	rl := newRateLimiter(3)
+	for i := 0; i < 3; i++ {
+		if !rl.allow() {
+			t.Fatalf("allow() returned false on attempt %d, expected true", i+1)
+		}
+	}
+	// 4th attempt must be blocked
+	if rl.allow() {
+		t.Error("allow() returned true beyond max tokens")
+	}
+}
+
+func TestRateLimiter_Unlimited(t *testing.T) {
+	rl := newRateLimiter(0) // 0 = unlimited
+	for i := 0; i < 1000; i++ {
+		if !rl.allow() {
+			t.Fatalf("unlimited rate limiter blocked on attempt %d", i+1)
+		}
+	}
+}
+
+func TestRateLimiter_Refills(t *testing.T) {
+	rl := newRateLimiter(2)
+	rl.allow()
+	rl.allow()
+	if rl.allow() {
+		t.Fatal("should be empty after 2 allows")
+	}
+	// Force a refill by backdating lastRefill by 1 minute
+	rl.mu.Lock()
+	rl.lastRefill = time.Now().Add(-time.Minute)
+	rl.mu.Unlock()
+	if !rl.allow() {
+		t.Error("should allow after refill")
+	}
+}
+
+func TestFire_RateLimit_CapsWebhooks(t *testing.T) {
+	received := make(chan struct{}, 100)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		received <- struct{}{}
+		w.WriteHeader(200)
+	}))
+	defer srv.Close()
+
+	original := config.Get()
+	defer config.Set(original)
+	ResetDedupForTesting()
+
+	cfg := config.Default()
+	cfg.Alerting.Enabled = true
+	cfg.Alerting.WebhookURL = srv.URL
+	cfg.Alerting.MinScoreThreshold = 5.0
+	cfg.Alerting.DeduplicationWindowSec = 1 // short window so flows aren't deduped
+	cfg.Alerting.MaxAlertsPerMinute = 2
+	config.Set(cfg)
+
+	// Force rate limiter to be rebuilt with the new max
+	rateLimiterMu.Lock()
+	rateLimiterLastMax = -1 // force rebuild
+	rateLimiterMu.Unlock()
+
+	// Build 10 distinct flows
+	flows := make([]aggregate.FlowRecord, 10)
+	for i := range flows {
+		flows[i] = aggregate.FlowRecord{
+			SrcIP: fmt.Sprintf("10.0.%d.1", i), DstIP: "1.2.3.4",
+			SrcPort: uint16(10000 + i), DstPort: 443, Protocol: "TCP",
+			SuspicionScore: 9.0,
+		}
+	}
+	Fire(flows)
+	time.Sleep(500 * time.Millisecond)
+
+	n := len(received)
+	if n > 2 {
+		t.Errorf("rate limit of 2/min exceeded: got %d webhook calls", n)
+	}
+}
+
+// ─── HMAC signing ─────────────────────────────────────────────────────────────
+
+func TestSignPayload_Deterministic(t *testing.T) {
+	sig1 := signPayload("secret", []byte(`{"test":1}`))
+	sig2 := signPayload("secret", []byte(`{"test":1}`))
+	if sig1 != sig2 {
+		t.Error("signPayload is not deterministic")
+	}
+	if sig1[:7] != "sha256=" {
+		t.Errorf("expected sha256= prefix, got %q", sig1[:7])
+	}
+}
+
+func TestSignPayload_DifferentSecrets(t *testing.T) {
+	body := []byte(`{"alert":"test"}`)
+	sig1 := signPayload("secret1", body)
+	sig2 := signPayload("secret2", body)
+	if sig1 == sig2 {
+		t.Error("different secrets produced identical signatures")
+	}
+}
+
+func TestFire_HMACSignature_SentWhenSecretConfigured(t *testing.T) {
+	received := make(chan string, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		received <- r.Header.Get("X-FlowSentinel-Signature")
+		w.WriteHeader(200)
+	}))
+	defer srv.Close()
+
+	original := config.Get()
+	defer config.Set(original)
+	ResetDedupForTesting()
+
+	cfg := config.Default()
+	cfg.Alerting.Enabled = true
+	cfg.Alerting.WebhookURL = srv.URL
+	cfg.Alerting.MinScoreThreshold = 5.0
+	cfg.Alerting.WebhookSecret = "mysecret"
+	config.Set(cfg)
+
+	Fire([]aggregate.FlowRecord{{
+		SrcIP: "10.5.5.5", DstIP: "1.2.3.4", SrcPort: 55555, DstPort: 443,
+		Protocol: "TCP", SuspicionScore: 9.0,
+	}})
+
+	select {
+	case sig := <-received:
+		if sig == "" {
+			t.Error("X-FlowSentinel-Signature header was empty")
+		}
+		if len(sig) < 7 || sig[:7] != "sha256=" {
+			t.Errorf("unexpected signature format: %q", sig)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("webhook not called within 3s")
+	}
+}
+
+func TestFire_NoHMACSignature_WhenSecretEmpty(t *testing.T) {
+	received := make(chan string, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		received <- r.Header.Get("X-FlowSentinel-Signature")
+		w.WriteHeader(200)
+	}))
+	defer srv.Close()
+
+	original := config.Get()
+	defer config.Set(original)
+	ResetDedupForTesting()
+
+	cfg := config.Default()
+	cfg.Alerting.Enabled = true
+	cfg.Alerting.WebhookURL = srv.URL
+	cfg.Alerting.MinScoreThreshold = 5.0
+	cfg.Alerting.WebhookSecret = "" // no secret
+	config.Set(cfg)
+
+	Fire([]aggregate.FlowRecord{{
+		SrcIP: "10.6.6.6", DstIP: "1.2.3.4", SrcPort: 60000, DstPort: 443,
+		Protocol: "TCP", SuspicionScore: 9.0,
+	}})
+
+	select {
+	case sig := <-received:
+		if sig != "" {
+			t.Errorf("expected no signature header, got %q", sig)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("webhook not called within 3s")
+	}
+}
+
 func TestFire_EnvVarWebhook_Overrides(t *testing.T) {
 	received := make(chan struct{}, 1)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

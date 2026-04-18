@@ -26,6 +26,8 @@ type Config struct {
 	History  HistoryConfig  `yaml:"history"`
 	Alerting AlertingConfig `yaml:"alerting"`
 	Daemon   DaemonConfig   `yaml:"daemon"`
+	JA3Feed  JA3FeedConfig  `yaml:"ja3_feed"`
+	Metrics  MetricsConfig  `yaml:"metrics"`
 }
 
 // ScoringConfig controls every detection-engine threshold.
@@ -67,16 +69,35 @@ type ScoringConfig struct {
 	// monitoring agents that exhibit beacon-like traffic patterns.
 	ExemptedProcesses []string `yaml:"exempted_processes"`
 
+	// DNS response analysis thresholds.
+	// NXDomainStormThreshold is the minimum number of NXDOMAIN responses in a
+	// single flow before it is flagged as a potential DGA/C2 NXDOMAIN storm.
+	// Default: 5.
+	NXDomainStormThreshold int `yaml:"nxdomain_storm_threshold"`
+	// FastFluxTTLThreshold flags flows whose minimum observed DNS TTL is below
+	// this value (seconds). Very low TTLs indicate fast-flux or DGA domains.
+	// Default: 30.
+	FastFluxTTLThreshold int `yaml:"fast_flux_ttl_threshold"`
+
+	// AsymmetricUploadRatio flags flows where upload bytes exceed download bytes
+	// by this factor, indicating potential data exfiltration.
+	// Default: 10.0 (upload > 10× download triggers the signal).
+	AsymmetricUploadRatio float64 `yaml:"asymmetric_upload_ratio"`
+
 	// Kill-switches — set to true to silence a noisy signal entirely.
-	DisableBinaryPathScoring bool `yaml:"disable_binary_path_scoring"`
-	DisableCmdlineScoring    bool `yaml:"disable_cmdline_scoring"`
-	DisablePortScoring       bool `yaml:"disable_port_scoring"`
-	DisableBeaconingScoring  bool `yaml:"disable_beaconing_scoring"`
-	DisableDNSExfilScoring   bool `yaml:"disable_dns_exfil_scoring"`
-	DisableGeoScoring        bool `yaml:"disable_geo_scoring"`
-	DisableJA3Scoring        bool `yaml:"disable_ja3_scoring"`
-	DisableReverseDNSScoring bool `yaml:"disable_reverse_dns_scoring"`
-	DisableSNIScoring        bool `yaml:"disable_sni_scoring"`
+	DisableBinaryPathScoring       bool `yaml:"disable_binary_path_scoring"`
+	DisableCmdlineScoring          bool `yaml:"disable_cmdline_scoring"`
+	DisablePortScoring             bool `yaml:"disable_port_scoring"`
+	DisableBeaconingScoring        bool `yaml:"disable_beaconing_scoring"`
+	DisableDNSExfilScoring         bool `yaml:"disable_dns_exfil_scoring"`
+	DisableGeoScoring              bool `yaml:"disable_geo_scoring"`
+	DisableJA3Scoring              bool `yaml:"disable_ja3_scoring"`
+	DisableReverseDNSScoring       bool `yaml:"disable_reverse_dns_scoring"`
+	DisableSNIScoring              bool `yaml:"disable_sni_scoring"`
+	DisableQUICScoring             bool `yaml:"disable_quic_scoring"`
+	DisableLateralMovementScoring  bool `yaml:"disable_lateral_movement_scoring"`
+	DisableProtocolAnomalyScoring  bool `yaml:"disable_protocol_anomaly_scoring"`
+	DisableAsymmetricScoring       bool `yaml:"disable_asymmetric_scoring"`
 
 	// CompiledExtraCmdlinePatterns holds compiled versions of ExtraCmdlinePatterns.
 	// Populated automatically after config load. Not serialized — use this
@@ -117,13 +138,49 @@ type AlertingConfig struct {
 	// DeduplicationWindowSec suppresses repeat alerts for the same flow within
 	// this window. 0 means use the built-in default (300 s).
 	DeduplicationWindowSec int `yaml:"deduplication_window_seconds"`
+	// MaxAlertsPerMinute caps the webhook POST rate. 0 means unlimited.
+	// Default: 60 (prevents bursts from saturating the receiving endpoint).
+	MaxAlertsPerMinute int `yaml:"max_alerts_per_minute"`
+	// WebhookSecret enables HMAC-SHA256 request signing when non-empty.
+	// The X-FlowSentinel-Signature header will contain "sha256=<hex>".
+	// The receiving endpoint should verify: HMAC-SHA256(secret, body).
+	WebhookSecret string `yaml:"webhook_secret"`
 }
 
 // DaemonConfig controls the --daemon continuous-monitoring mode.
 type DaemonConfig struct {
-	Interface          string `yaml:"interface"`
-	BPFFilter          string `yaml:"bpf_filter"`
-	CaptureIntervalSec int    `yaml:"capture_interval_seconds"`
+	// Interface is kept for backward compatibility. If Interfaces is empty
+	// and Interface is non-empty, the daemon uses Interface as a single-element
+	// list. Prefer Interfaces for new configurations.
+	Interface  string   `yaml:"interface"`
+	Interfaces []string `yaml:"interfaces"`
+	BPFFilter  string   `yaml:"bpf_filter"`
+	CaptureIntervalSec int `yaml:"capture_interval_seconds"`
+}
+
+// JA3FeedConfig controls the dynamic JA3 threat-intel feed.
+type JA3FeedConfig struct {
+	// Enabled controls whether the feed is fetched and used. Default: false.
+	// When false, only the built-in static hash list and ExtraJA3BadHashes are used.
+	Enabled bool `yaml:"enabled"`
+	// UpdateIntervalHours is how often the remote feeds are refreshed. Default: 24.
+	UpdateIntervalHours int `yaml:"update_interval_hours"`
+	// URLs is the list of remote CSV feeds to fetch. Each URL must return a CSV
+	// where column 0 is a 32-char MD5 hex hash and column 1 is a description.
+	// The abuse.ch SSL blacklist format (quoted fields) is also accepted.
+	URLs []string `yaml:"urls"`
+	// LocalFile is an optional path to a local CSV file in the same format.
+	// Entries from this file take priority over remote feeds.
+	LocalFile string `yaml:"local_file"`
+}
+
+// MetricsConfig controls the optional Prometheus metrics endpoint.
+type MetricsConfig struct {
+	// Enabled controls whether the /metrics HTTP server is started. Default: false.
+	// When false, no port is opened and no prometheus dependency is initialised.
+	Enabled bool `yaml:"enabled"`
+	// ListenAddr is the TCP address for the metrics endpoint. Default: ":9200".
+	ListenAddr string `yaml:"listen_addr"`
 }
 
 // ─── Defaults ─────────────────────────────────────────────────────────────────
@@ -137,10 +194,13 @@ func Default() *Config {
 			BeaconingPossibleCV:     0.30,
 			BeaconingMinPackets:     5,
 			BeaconingMinIntervalSec: 0, // disabled by default; set > 0 to filter sub-N-second intervals
-			DNSEntropyThreshold:  3.5,
-			DNSLabelLenThreshold: 40,
-			ScanConfirmedDests:   20,
-			ScanPossibleDests:    8,
+			DNSEntropyThreshold:     3.5,
+			DNSLabelLenThreshold:    40,
+			ScanConfirmedDests:      20,
+			ScanPossibleDests:       8,
+			NXDomainStormThreshold:  5,
+			FastFluxTTLThreshold:    30,
+			AsymmetricUploadRatio:   10.0,
 		},
 		Capture: CaptureConfig{
 			DefaultDurationSec: 5,
@@ -157,9 +217,21 @@ func Default() *Config {
 		Alerting: AlertingConfig{
 			MinScoreThreshold:      7.0,
 			DeduplicationWindowSec: 300,
+			MaxAlertsPerMinute:     60,
 		},
 		Daemon: DaemonConfig{
 			CaptureIntervalSec: 300,
+		},
+		JA3Feed: JA3FeedConfig{
+			Enabled:             false,
+			UpdateIntervalHours: 24,
+			URLs: []string{
+				"https://sslbl.abuse.ch/blacklist/ja3_fingerprints.csv",
+			},
+		},
+		Metrics: MetricsConfig{
+			Enabled:    false,
+			ListenAddr: ":9200",
 		},
 	}
 	// Default() is called with empty ExtraCmdlinePatterns so this never errors.
@@ -247,6 +319,15 @@ func mergeOverDefaults(dst, override *Config) {
 	if o.ScanPossibleDests != 0 {
 		s.ScanPossibleDests = o.ScanPossibleDests
 	}
+	if o.NXDomainStormThreshold != 0 {
+		s.NXDomainStormThreshold = o.NXDomainStormThreshold
+	}
+	if o.FastFluxTTLThreshold != 0 {
+		s.FastFluxTTLThreshold = o.FastFluxTTLThreshold
+	}
+	if o.AsymmetricUploadRatio != 0 {
+		s.AsymmetricUploadRatio = o.AsymmetricUploadRatio
+	}
 	if len(o.ExtraBadPorts) > 0 {
 		s.ExtraBadPorts = o.ExtraBadPorts
 	}
@@ -295,6 +376,18 @@ func mergeOverDefaults(dst, override *Config) {
 	}
 	if o.DisableSNIScoring {
 		s.DisableSNIScoring = true
+	}
+	if o.DisableQUICScoring {
+		s.DisableQUICScoring = true
+	}
+	if o.DisableLateralMovementScoring {
+		s.DisableLateralMovementScoring = true
+	}
+	if o.DisableProtocolAnomalyScoring {
+		s.DisableProtocolAnomalyScoring = true
+	}
+	if o.DisableAsymmetricScoring {
+		s.DisableAsymmetricScoring = true
 	}
 
 	c := &dst.Capture
@@ -349,16 +442,50 @@ func mergeOverDefaults(dst, override *Config) {
 		a.DeduplicationWindowSec = oa.DeduplicationWindowSec
 	}
 
+	if oa.MaxAlertsPerMinute != 0 {
+		a.MaxAlertsPerMinute = oa.MaxAlertsPerMinute
+	}
+	if oa.WebhookSecret != "" {
+		a.WebhookSecret = oa.WebhookSecret
+	}
+
 	d := &dst.Daemon
 	od := &override.Daemon
 	if od.Interface != "" {
 		d.Interface = od.Interface
+	}
+	if len(od.Interfaces) > 0 {
+		d.Interfaces = od.Interfaces
 	}
 	if od.BPFFilter != "" {
 		d.BPFFilter = od.BPFFilter
 	}
 	if od.CaptureIntervalSec != 0 {
 		d.CaptureIntervalSec = od.CaptureIntervalSec
+	}
+
+	jf := &dst.JA3Feed
+	ojf := &override.JA3Feed
+	if ojf.Enabled {
+		jf.Enabled = true
+	}
+	if ojf.UpdateIntervalHours != 0 {
+		jf.UpdateIntervalHours = ojf.UpdateIntervalHours
+	}
+	if len(ojf.URLs) > 0 {
+		jf.URLs = ojf.URLs
+	}
+	if ojf.LocalFile != "" {
+		jf.LocalFile = ojf.LocalFile
+	}
+
+	m := &dst.Metrics
+	om := &override.Metrics
+	if om.Enabled {
+		m.Enabled = true
+	}
+	if om.ListenAddr != "" {
+		m.ListenAddr = om.ListenAddr
 	}
 }
 
@@ -581,6 +708,16 @@ scoring:
   #   - "node_exporter"
   #   - "datadog-agent"
 
+  # ── DNS response analysis ─────────────────────────────────────────────────
+  # Flag flows with >= N NXDOMAIN responses (DGA/C2 storm indicator).
+  nxdomain_storm_threshold: 5
+  # Flag flows whose minimum observed DNS TTL is below N seconds (fast-flux/DGA).
+  fast_flux_ttl_threshold: 30
+
+  # ── Asymmetric upload detection ───────────────────────────────────────────
+  # Flag flows where sent bytes > N × received bytes (potential exfiltration).
+  asymmetric_upload_ratio: 10.0
+
   # ── Kill-switches — set true to silence noisy signals ─────────────────────
   # Useful if /tmp is normal in your environment (build systems, containers).
   disable_binary_path_scoring: false
@@ -589,7 +726,7 @@ scoring:
   disable_port_scoring: false
   # Disable beaconing detection (noisy on environments with regular heartbeats).
   disable_beaconing_scoring: false
-  # Disable DNS exfiltration detection.
+  # Disable DNS exfiltration detection (entropy, NXDOMAIN storm, fast-flux TTL).
   disable_dns_exfil_scoring: false
   # Disable GeoIP / ASN high-risk scoring.
   disable_geo_scoring: false
@@ -599,6 +736,14 @@ scoring:
   disable_reverse_dns_scoring: false
   # Disable TLS SNI analysis (missing SNI, DoH providers).
   disable_sni_scoring: false
+  # Disable QUIC scoring for non-browser processes.
+  disable_quic_scoring: false
+  # Disable lateral movement detection (RFC1918→RFC1918 on SMB/RDP/WMI/LDAP/WinRM).
+  disable_lateral_movement_scoring: false
+  # Disable protocol anomaly detection (non-TLS on 443, excessive DNS over TCP).
+  disable_protocol_anomaly_scoring: false
+  # Disable asymmetric upload ratio detection.
+  disable_asymmetric_scoring: false
 
 # ─── Capture Timing ───────────────────────────────────────────────────────────
 capture:
@@ -629,11 +774,32 @@ alerting:
   # webhook_url: "https://hooks.slack.com/services/T.../B.../..."
   min_score_threshold: 7.0              # Only alert on CRITICAL flows (score >= 7.0)
   deduplication_window_seconds: 300     # Suppress repeat alerts for the same flow within this window
+  max_alerts_per_minute: 60            # Rate limit — caps webhook POST rate (0 = unlimited)
+  webhook_secret: ""                   # HMAC-SHA256 signing secret — adds X-FlowSentinel-Signature header
 
 # ─── Daemon Mode ──────────────────────────────────────────────────────────────
 # Used when running: mcp-flowsentinel --daemon
 daemon:
-  interface: ""                    # Interface to monitor (empty = auto-select)
+  interface: ""                    # Single interface (legacy — prefer interfaces list below)
+  # interfaces:                    # Monitor multiple interfaces in parallel
+  #   - "eth0"
+  #   - "eth1"
+  #   - "docker0"
   bpf_filter: ""                   # Optional BPF filter, e.g. "not port 22"
   capture_interval_seconds: 300    # Analyse traffic in N-second rolling windows
+
+# ─── JA3 Dynamic Threat Feed ──────────────────────────────────────────────────
+# Fetches community JA3 fingerprint blacklists and merges with the built-in list.
+ja3_feed:
+  enabled: false                   # Set true to enable remote feed fetching
+  update_interval_hours: 24        # Refresh interval
+  urls:
+    - "https://sslbl.abuse.ch/blacklist/ja3_fingerprints.csv"
+  local_file: ""                   # Optional local CSV override (hash,description)
+
+# ─── Prometheus Metrics ────────────────────────────────────────────────────────
+# Exposes a /metrics endpoint for Prometheus scraping.
+metrics:
+  enabled: false        # Set true to start the metrics HTTP server
+  listen_addr: ":9200"  # Address and port for the Prometheus scrape endpoint
 `

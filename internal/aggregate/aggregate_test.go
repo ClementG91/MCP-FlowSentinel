@@ -817,3 +817,384 @@ func TestScore_NonStandardPort_LessThan49152_AddsReason(t *testing.T) {
 		t.Errorf("expected 'non-standard port 1234' reason, got reasons=%v (score=%.2f)", reasons, s)
 	}
 }
+
+// ─── isBrowserProcess ─────────────────────────────────────────────────────────
+
+func TestIsBrowserProcess(t *testing.T) {
+	browsers := []string{"chrome", "Chrome", "CHROME", "chromium", "firefox", "msedge", "safari", "brave", "opera"}
+	for _, name := range browsers {
+		if !isBrowserProcess(name) {
+			t.Errorf("isBrowserProcess(%q) = false, want true", name)
+		}
+	}
+	nonBrowsers := []string{"curl", "python3", "nc", "wget", "implant", ""}
+	for _, name := range nonBrowsers {
+		if isBrowserProcess(name) {
+			t.Errorf("isBrowserProcess(%q) = true, want false", name)
+		}
+	}
+}
+
+// ─── lateralMovementSignal ────────────────────────────────────────────────────
+
+func TestLateralMovementSignal(t *testing.T) {
+	cases := []struct {
+		port     uint16
+		wantPts  float64
+		wantHint string
+	}{
+		{445, 2.5, "SMB"},
+		{3389, 2.5, "RDP"},
+		{5985, 2.0, "WinRM"},
+		{5986, 2.0, "WinRM"},
+		{135, 2.0, "WMI"},
+		{389, 1.5, "LDAP"},
+		{636, 1.5, "LDAPS"},
+		{22, 1.0, "SSH"},
+		{80, 0, ""},   // normal port — no signal
+		{443, 0, ""},  // normal port — no signal
+	}
+	for _, tc := range cases {
+		pts, reason := lateralMovementSignal(tc.port)
+		if pts != tc.wantPts {
+			t.Errorf("lateralMovementSignal(%d): pts=%.1f, want %.1f", tc.port, pts, tc.wantPts)
+		}
+		if tc.wantHint != "" && !strings.Contains(reason, tc.wantHint) {
+			t.Errorf("lateralMovementSignal(%d): reason=%q should contain %q", tc.port, reason, tc.wantHint)
+		}
+	}
+}
+
+// ─── QUIC scoring ─────────────────────────────────────────────────────────────
+
+func TestScore_QUIC_NonBrowserProcess_AddsReason(t *testing.T) {
+	key := FlowKey{SrcIP: "10.0.0.1", DstIP: "1.2.3.4", DstPort: 443, Proto: "UDP"}
+	rec := makeRec(withRDNS("cdn.example"), func(r *FlowRecord) {
+		r.IsQUIC = true
+		r.ProcessName = "implant"
+		r.DstIP = "1.2.3.4"
+	})
+	_, reasons := score(key, rec, nil)
+	found := false
+	for _, r := range reasons {
+		if strings.Contains(r, "non-browser process") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected QUIC non-browser reason, got: %v", reasons)
+	}
+}
+
+func TestScore_QUIC_BrowserProcess_NoReason(t *testing.T) {
+	key := FlowKey{SrcIP: "10.0.0.1", DstIP: "1.2.3.4", DstPort: 443, Proto: "UDP"}
+	rec := makeRec(withRDNS("cdn.example"), func(r *FlowRecord) {
+		r.IsQUIC = true
+		r.ProcessName = "chrome"
+		r.DstIP = "1.2.3.4"
+	})
+	_, reasons := score(key, rec, nil)
+	for _, r := range reasons {
+		if strings.Contains(r, "non-browser process") {
+			t.Errorf("browser process should not produce QUIC reason, got: %q", r)
+		}
+	}
+}
+
+func TestScore_QUIC_HighRiskASN_AddsReason(t *testing.T) {
+	key := FlowKey{SrcIP: "10.0.0.1", DstIP: "5.5.5.5", DstPort: 443, Proto: "UDP"}
+	rec := makeRec(withRDNS("evil.host"), func(r *FlowRecord) {
+		r.IsQUIC = true
+		r.GeoHighRisk = true
+		r.ASNOrg = "BadASN"
+		r.DstIP = "5.5.5.5"
+	})
+	_, reasons := score(key, rec, nil)
+	found := false
+	for _, r := range reasons {
+		if strings.Contains(r, "QUIC connection to high-risk ASN") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected QUIC high-risk ASN reason, got: %v", reasons)
+	}
+}
+
+// ─── Lateral movement scoring ─────────────────────────────────────────────────
+
+func TestScore_LateralMovement_SMB_AddsReason(t *testing.T) {
+	// RFC1918 → RFC1918 on port 445 should produce lateral movement reason.
+	key := FlowKey{SrcIP: "192.168.1.10", DstIP: "192.168.1.20", DstPort: 445, Proto: "TCP"}
+	rec := makeRec(func(r *FlowRecord) {
+		r.SrcIP = "192.168.1.10"
+		r.DstIP = "192.168.1.20"
+	})
+	_, reasons := score(key, rec, nil)
+	found := false
+	for _, r := range reasons {
+		if strings.Contains(r, "SMB") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected SMB lateral movement reason, got: %v", reasons)
+	}
+}
+
+func TestScore_LateralMovement_PublicDst_NoLateralReason(t *testing.T) {
+	// RFC1918 source → public destination should NOT trigger lateral movement.
+	key := FlowKey{SrcIP: "192.168.1.10", DstIP: "203.0.113.5", DstPort: 445, Proto: "TCP"}
+	rec := makeRec(withRDNS("ext.host"), func(r *FlowRecord) {
+		r.SrcIP = "192.168.1.10"
+		r.DstIP = "203.0.113.5"
+	})
+	_, reasons := score(key, rec, nil)
+	for _, r := range reasons {
+		if strings.Contains(r, "lateral") {
+			t.Errorf("public destination should not trigger lateral movement, got: %q", r)
+		}
+	}
+}
+
+// ─── Protocol anomaly scoring ─────────────────────────────────────────────────
+
+func TestScore_ProtocolAnomaly_NonTLSOn443_AddsReason(t *testing.T) {
+	key := FlowKey{SrcIP: "10.0.0.1", DstIP: "1.2.3.4", DstPort: 443, Proto: "TCP"}
+	rec := makeRec(withRDNS("host.example"), func(r *FlowRecord) {
+		r.PacketCount = 15
+		// JA3Hash and IsQUIC remain zero-value → triggers non-TLS check
+		r.DstIP = "1.2.3.4"
+	})
+	_, reasons := score(key, rec, nil)
+	found := false
+	for _, r := range reasons {
+		if strings.Contains(r, "non-TLS traffic on TCP port 443") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected non-TLS reason for TCP 443 without JA3, got: %v", reasons)
+	}
+}
+
+func TestScore_ProtocolAnomaly_TLSPresent_NoAnomalyReason(t *testing.T) {
+	// If JA3 hash is set, the flow IS TLS — no anomaly reason expected.
+	key := FlowKey{SrcIP: "10.0.0.1", DstIP: "1.2.3.4", DstPort: 443, Proto: "TCP"}
+	rec := makeRec(withRDNS("host.example"), func(r *FlowRecord) {
+		r.PacketCount = 15
+		r.JA3Hash = "deadbeef00112233deadbeef00112233"
+		r.DstIP = "1.2.3.4"
+	})
+	_, reasons := score(key, rec, nil)
+	for _, r := range reasons {
+		if strings.Contains(r, "non-TLS traffic on TCP port 443") {
+			t.Errorf("TLS flow should not trigger non-TLS anomaly, got: %q", r)
+		}
+	}
+}
+
+func TestScore_ProtocolAnomaly_ExcessiveDNSoverTCP_AddsReason(t *testing.T) {
+	key := FlowKey{SrcIP: "10.0.0.1", DstIP: "8.8.8.8", DstPort: 53, Proto: "TCP"}
+	rec := makeRec(withRDNS("dns.google"), func(r *FlowRecord) {
+		r.ByteCount = 600 * 1024 // 600 KB > 512 KB threshold
+		r.DstIP = "8.8.8.8"
+	})
+	_, reasons := score(key, rec, nil)
+	found := false
+	for _, r := range reasons {
+		if strings.Contains(r, "excessive DNS over TCP") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected excessive DNS over TCP reason, got: %v", reasons)
+	}
+}
+
+// ─── DNS response analysis scoring ───────────────────────────────────────────
+
+func TestScore_NXDomainStorm_AddsReason(t *testing.T) {
+	key := FlowKey{SrcIP: "10.0.0.1", DstIP: "8.8.8.8", DstPort: 53, Proto: "UDP"}
+	rec := makeRec(withRDNS("dns.google"), func(r *FlowRecord) {
+		r.NXDomainCount = 10 // exceeds default threshold of 5
+		r.DstIP = "8.8.8.8"
+	})
+	_, reasons := score(key, rec, nil)
+	found := false
+	for _, r := range reasons {
+		if strings.Contains(r, "nxdomain storm") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected NXDOMAIN storm reason for count=10, got: %v", reasons)
+	}
+}
+
+func TestScore_NXDomainBelowThreshold_NoReason(t *testing.T) {
+	key := FlowKey{SrcIP: "10.0.0.1", DstIP: "8.8.8.8", DstPort: 53, Proto: "UDP"}
+	rec := makeRec(withRDNS("dns.google"), func(r *FlowRecord) {
+		r.NXDomainCount = 3 // below default threshold of 5
+		r.DstIP = "8.8.8.8"
+	})
+	_, reasons := score(key, rec, nil)
+	for _, r := range reasons {
+		if strings.Contains(r, "nxdomain storm") {
+			t.Errorf("count=3 should not trigger storm reason, got: %q", r)
+		}
+	}
+}
+
+func TestScore_FastFluxTTL_AddsReason(t *testing.T) {
+	key := FlowKey{SrcIP: "10.0.0.1", DstIP: "8.8.8.8", DstPort: 53, Proto: "UDP"}
+	rec := makeRec(withRDNS("dns.google"), func(r *FlowRecord) {
+		r.MinDNSTTL = 10 // < 30s threshold
+		r.DstIP = "8.8.8.8"
+	})
+	_, reasons := score(key, rec, nil)
+	found := false
+	for _, r := range reasons {
+		if strings.Contains(r, "low dns ttl") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected low-TTL reason for MinDNSTTL=10, got: %v", reasons)
+	}
+}
+
+func TestScore_NormalTTL_NoFastFluxReason(t *testing.T) {
+	key := FlowKey{SrcIP: "10.0.0.1", DstIP: "8.8.8.8", DstPort: 53, Proto: "UDP"}
+	rec := makeRec(withRDNS("dns.google"), func(r *FlowRecord) {
+		r.MinDNSTTL = 300 // normal 5-minute TTL
+		r.DstIP = "8.8.8.8"
+	})
+	_, reasons := score(key, rec, nil)
+	for _, r := range reasons {
+		if strings.Contains(r, "low dns ttl") {
+			t.Errorf("normal TTL=300 should not trigger fast-flux reason, got: %q", r)
+		}
+	}
+}
+
+// ─── DNS response accumulation in flowState ───────────────────────────────────
+
+func TestAggregatorAdd_NXDomainCountAccumulates(t *testing.T) {
+	agg := &Aggregator{}
+	now := time.Now()
+
+	for i := 0; i < 7; i++ {
+		agg.Add(PacketEvent{
+			SrcIP:       net.ParseIP("10.0.0.1"),
+			DstIP:       net.ParseIP("8.8.8.8"),
+			SrcPort:     12345,
+			DstPort:     53,
+			Proto:       "UDP",
+			Timestamp:   now,
+			DNSNXDomain: true,
+		})
+	}
+
+	records := agg.Finalize(nil)
+	if len(records) != 1 {
+		t.Fatalf("expected 1 flow, got %d", len(records))
+	}
+	if records[0].NXDomainCount != 7 {
+		t.Errorf("NXDomainCount = %d, want 7", records[0].NXDomainCount)
+	}
+}
+
+func TestAggregatorAdd_MinDNSTTL_TracksMinimum(t *testing.T) {
+	agg := &Aggregator{}
+	now := time.Now()
+
+	for _, ttl := range []uint32{300, 60, 10, 120} {
+		agg.Add(PacketEvent{
+			SrcIP:         net.ParseIP("10.0.0.1"),
+			DstIP:         net.ParseIP("8.8.8.8"),
+			SrcPort:       12345,
+			DstPort:       53,
+			Proto:         "UDP",
+			Timestamp:     now,
+			DNSMinRespTTL: ttl,
+		})
+	}
+
+	records := agg.Finalize(nil)
+	if len(records) != 1 {
+		t.Fatalf("expected 1 flow, got %d", len(records))
+	}
+	if records[0].MinDNSTTL != 10 {
+		t.Errorf("MinDNSTTL = %d, want 10 (minimum of 300/60/10/120)", records[0].MinDNSTTL)
+	}
+}
+
+func TestAggregatorAdd_QUIC_Propagates(t *testing.T) {
+	agg := &Aggregator{}
+	now := time.Now()
+
+	// First packet: not QUIC; second packet: QUIC — IsQUIC should be true.
+	agg.Add(PacketEvent{
+		SrcIP: net.ParseIP("10.0.0.1"), DstIP: net.ParseIP("1.2.3.4"),
+		SrcPort: 12345, DstPort: 443, Proto: "UDP", Timestamp: now,
+	})
+	agg.Add(PacketEvent{
+		SrcIP: net.ParseIP("10.0.0.1"), DstIP: net.ParseIP("1.2.3.4"),
+		SrcPort: 12345, DstPort: 443, Proto: "UDP", Timestamp: now.Add(time.Second),
+		IsQUIC: true,
+	})
+
+	records := agg.Finalize(nil)
+	if len(records) != 1 {
+		t.Fatalf("expected 1 flow, got %d", len(records))
+	}
+	if !records[0].IsQUIC {
+		t.Error("IsQUIC should be true when any packet in the flow is QUIC")
+	}
+}
+
+// ─── Asymmetric upload detection ─────────────────────────────────────────────
+
+func TestFinalize_AsymmetricUpload_AddsReason(t *testing.T) {
+	agg := &Aggregator{}
+	now := time.Now()
+
+	// Forward flow: client sends 10 MB
+	for i := 0; i < 5; i++ {
+		agg.Add(PacketEvent{
+			SrcIP:      net.ParseIP("10.0.0.1"),
+			DstIP:      net.ParseIP("1.2.3.4"),
+			SrcPort:    54321,
+			DstPort:    443,
+			Proto:      "TCP",
+			PayloadLen: 2 * 1024 * 1024, // 2 MB each → 10 MB total
+			Timestamp:  now.Add(time.Duration(i) * time.Second),
+		})
+	}
+	// Reverse flow: server sends 100 KB
+	for i := 0; i < 5; i++ {
+		agg.Add(PacketEvent{
+			SrcIP:      net.ParseIP("1.2.3.4"),
+			DstIP:      net.ParseIP("10.0.0.1"),
+			SrcPort:    443,
+			DstPort:    54321,
+			Proto:      "TCP",
+			PayloadLen: 20 * 1024, // 20 KB each → 100 KB total
+			Timestamp:  now.Add(time.Duration(i)*time.Second + 100*time.Millisecond),
+		})
+	}
+
+	records := agg.Finalize(nil)
+	found := false
+	for _, r := range records {
+		for _, reason := range r.SuspicionReasons {
+			if strings.Contains(reason, "asymmetric upload") {
+				found = true
+			}
+		}
+	}
+	if !found {
+		t.Error("expected 'asymmetric upload' reason when upload >> download")
+	}
+}

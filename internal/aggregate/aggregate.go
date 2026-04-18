@@ -138,11 +138,20 @@ type FlowRecord struct {
 	// JA3 TLS fingerprinting
 	JA3Hash     string `json:"ja3_hash,omitempty"`     // MD5 of TLS ClientHello parameters
 	JA3KnownBad string `json:"ja3_known_bad,omitempty"` // malware family if hash matches known-bad list
+	// QUIC / transport enrichment
+	IsQUIC bool `json:"is_quic,omitempty"` // true when at least one QUIC Initial packet was observed
+	// DNS response analysis
+	NXDomainCount int    `json:"nxdomain_count,omitempty"` // number of NXDOMAIN responses in this flow
+	MinDNSTTL     uint32 `json:"min_dns_ttl,omitempty"`    // minimum A/AAAA TTL observed (0 = no answers)
 	// Analysis fields
 	SuspicionScore   float64  `json:"suspicion_score"`
 	RiskLevel        string   `json:"risk_level"`
 	SuspicionReasons []string `json:"suspicion_reasons,omitempty"`
-	CleanSignals     []string `json:"clean_signals,omitempty"`
+	// MITRE ATT&CK techniques matched by the detection reasons (deduplicated).
+	MITRETechniques []intel.MITRETechnique `json:"mitre_techniques,omitempty"`
+	CleanSignals    []string               `json:"clean_signals,omitempty"`
+	// Interface is the capture interface this flow was observed on (daemon mode only).
+	Interface string `json:"interface,omitempty"`
 }
 
 // ProcessResolver maps a packet four-tuple to the process that owns it.
@@ -151,16 +160,19 @@ type ProcessResolver func(srcIP string, srcPort uint16, dstIP string, dstPort ui
 
 // flowState is the mutable, concurrent-safe per-flow accumulator.
 type flowState struct {
-	mu          sync.Mutex
-	srcPort     uint16
-	packetCount int64
-	byteCount   int64
-	firstSeen   time.Time
-	lastSeen    time.Time
-	timestamps  []time.Time
-	dnsQueries  map[string]struct{} // unique DNS query names observed for this flow
-	tlsNames    map[string]struct{} // unique TLS SNI names observed for this flow
-	ja3Hash     string              // first JA3 fingerprint observed for this flow
+	mu            sync.Mutex
+	srcPort       uint16
+	packetCount   int64
+	byteCount     int64
+	firstSeen     time.Time
+	lastSeen      time.Time
+	timestamps    []time.Time
+	dnsQueries    map[string]struct{} // unique DNS query names observed for this flow
+	tlsNames      map[string]struct{} // unique TLS SNI names observed for this flow
+	ja3Hash       string              // first JA3 fingerprint observed for this flow
+	isQUIC        bool                // any packet in this flow was a QUIC Initial
+	nxdomainCount int                 // number of NXDOMAIN responses in this flow
+	minDNSTTL     uint32              // minimum A/AAAA TTL from DNS responses; 0 = not seen
 }
 
 // Aggregator accumulates PacketEvents into flow states using a sync.Map
@@ -172,16 +184,19 @@ type Aggregator struct {
 // PacketEvent mirrors capture.PacketEvent but uses net.IP to avoid an
 // import cycle between aggregate and capture.
 type PacketEvent struct {
-	SrcIP      net.IP
-	DstIP      net.IP
-	SrcPort    uint16
-	DstPort    uint16
-	Proto      string
-	PayloadLen uint32
-	Timestamp  time.Time
-	DNSQuery   string // first question name from a DNS packet (optional)
-	TLSSNIName string // server name from TLS ClientHello (optional)
-	JA3Hash    string // JA3 fingerprint of TLS ClientHello (optional)
+	SrcIP         net.IP
+	DstIP         net.IP
+	SrcPort       uint16
+	DstPort       uint16
+	Proto         string
+	PayloadLen    uint32
+	Timestamp     time.Time
+	DNSQuery      string // first question name from a DNS packet (optional)
+	TLSSNIName    string // server name from TLS ClientHello (optional)
+	JA3Hash       string // JA3 fingerprint of TLS ClientHello (optional)
+	IsQUIC        bool   // true when UDP 443 payload is a QUIC Initial packet
+	DNSNXDomain   bool   // DNS response returned NXDOMAIN
+	DNSMinRespTTL uint32 // minimum A/AAAA TTL from DNS response (0 = no answers)
 }
 
 // Add processes a single packet event.
@@ -223,6 +238,17 @@ func (a *Aggregator) Add(pkt PacketEvent) {
 	if pkt.JA3Hash != "" && fs.ja3Hash == "" {
 		fs.ja3Hash = pkt.JA3Hash // keep only the first seen ClientHello per flow
 	}
+	if pkt.IsQUIC {
+		fs.isQUIC = true
+	}
+	if pkt.DNSNXDomain {
+		fs.nxdomainCount++
+	}
+	if pkt.DNSMinRespTTL > 0 {
+		if fs.minDNSTTL == 0 || pkt.DNSMinRespTTL < fs.minDNSTTL {
+			fs.minDNSTTL = pkt.DNSMinRespTTL
+		}
+	}
 	fs.mu.Unlock()
 }
 
@@ -263,19 +289,25 @@ func (a *Aggregator) Finalize(resolver ProcessResolver) []FlowRecord {
 		}
 
 		ja3h := fs.ja3Hash
+		isQUIC := fs.isQUIC
+		nxdomainCount := fs.nxdomainCount
+		minDNSTTL := fs.minDNSTTL
 		rec := FlowRecord{
-			SrcIP:       key.SrcIP,
-			DstIP:       key.DstIP,
-			SrcPort:     fs.srcPort,
-			DstPort:     key.DstPort,
-			Protocol:    key.Proto,
-			PacketCount: fs.packetCount,
-			ByteCount:   fs.byteCount,
-			FirstSeen:   fs.firstSeen,
-			LastSeen:    fs.lastSeen,
-			DNSQueries:  dnsSlice,
-			TLSSNIName:  sniName,
-			JA3Hash:     ja3h,
+			SrcIP:         key.SrcIP,
+			DstIP:         key.DstIP,
+			SrcPort:       fs.srcPort,
+			DstPort:       key.DstPort,
+			Protocol:      key.Proto,
+			PacketCount:   fs.packetCount,
+			ByteCount:     fs.byteCount,
+			FirstSeen:     fs.firstSeen,
+			LastSeen:      fs.lastSeen,
+			DNSQueries:    dnsSlice,
+			TLSSNIName:    sniName,
+			JA3Hash:       ja3h,
+			IsQUIC:        isQUIC,
+			NXDomainCount: nxdomainCount,
+			MinDNSTTL:     minDNSTTL,
 		}
 		fs.mu.Unlock()
 
@@ -321,7 +353,7 @@ func (a *Aggregator) Finalize(resolver ProcessResolver) []FlowRecord {
 			items[i].rec.GeoHighRisk = gi.IsHighRisk
 		}
 		if items[i].rec.JA3Hash != "" {
-			if family, ok := ja3.LookupWithCustom(items[i].rec.JA3Hash, extraJA3); ok {
+			if family, ok := ja3.LookupWithFeed(items[i].rec.JA3Hash, extraJA3); ok {
 				items[i].rec.JA3KnownBad = family
 			}
 		}
@@ -331,6 +363,7 @@ func (a *Aggregator) Finalize(resolver ProcessResolver) []FlowRecord {
 	records := make([]FlowRecord, len(items))
 	for i, it := range items {
 		it.rec.SuspicionScore, it.rec.SuspicionReasons = score(it.key, it.rec, it.timestamps)
+		it.rec.MITRETechniques = intel.TagFlow(it.rec.SuspicionReasons)
 		it.rec.CleanSignals = computeCleanSignals(it.rec)
 		it.rec.RiskLevel = riskLabel(it.rec.SuspicionScore)
 		records[i] = it.rec
@@ -360,6 +393,38 @@ func (a *Aggregator) Finalize(resolver ProcessResolver) []FlowRecord {
 		if bonus > 0 {
 			records[i].SuspicionScore = min(10.0, records[i].SuspicionScore+bonus)
 			records[i].SuspicionReasons = append(records[i].SuspicionReasons, reason)
+			records[i].MITRETechniques = intel.TagFlow(records[i].SuspicionReasons)
+			records[i].RiskLevel = riskLabel(records[i].SuspicionScore)
+		}
+	}
+
+	// ── Pass 5: asymmetric upload detection (cross-flow) ─────────────────────
+	// Build a fast lookup from FlowKey → record index so we can find reverse flows
+	// (server→client) to compare upload vs download byte counts.
+	if !config.Get().Scoring.DisableAsymmetricScoring {
+		byKey := make(map[FlowKey]int, len(records))
+		for i, r := range records {
+			byKey[FlowKey{SrcIP: r.SrcIP, DstIP: r.DstIP, DstPort: r.DstPort, Proto: r.Protocol}] = i
+		}
+		asymRatio := config.Get().Scoring.AsymmetricUploadRatio
+		for i, r := range records {
+			// The reverse flow key: server IP → client IP, DstPort = client's ephemeral SrcPort.
+			revKey := FlowKey{SrcIP: r.DstIP, DstIP: r.SrcIP, DstPort: r.SrcPort, Proto: r.Protocol}
+			j, ok := byKey[revKey]
+			if !ok {
+				continue
+			}
+			downBytes := records[j].ByteCount // bytes server→client
+			upBytes := r.ByteCount            // bytes client→server
+			if downBytes <= 0 || upBytes <= int64(float64(downBytes)*asymRatio) {
+				continue
+			}
+			ratio := float64(upBytes) / float64(downBytes)
+			reason := fmt.Sprintf("asymmetric upload ratio=%.1f (sent=%.0fKB recv=%.0fKB) — potential exfiltration",
+				ratio, float64(upBytes)/1024, float64(downBytes)/1024)
+			records[i].SuspicionScore = min(10.0, records[i].SuspicionScore+2.0)
+			records[i].SuspicionReasons = append(records[i].SuspicionReasons, reason)
+			records[i].MITRETechniques = intel.TagFlow(records[i].SuspicionReasons)
 			records[i].RiskLevel = riskLabel(records[i].SuspicionScore)
 		}
 	}
@@ -432,6 +497,49 @@ func isExemptedProcess(name string, exempted []string) bool {
 		}
 	}
 	return false
+}
+
+// knownBrowsers are process name substrings that indicate a web browser.
+// Browsers legitimately use QUIC (HTTP/3) so QUIC from a browser is not suspicious.
+var knownBrowsers = map[string]bool{
+	"chrome": true, "chromium": true, "firefox": true, "safari": true,
+	"msedge": true, "edge": true, "opera": true, "brave": true,
+	"vivaldi": true, "iexplore": true,
+}
+
+// isBrowserProcess returns true when the process name matches a known browser.
+func isBrowserProcess(name string) bool {
+	lower := strings.ToLower(name)
+	for b := range knownBrowsers {
+		if strings.Contains(lower, b) {
+			return true
+		}
+	}
+	return false
+}
+
+// lateralMovementSignal returns a (score, reason) for RFC1918→RFC1918 traffic on
+// sensitive ports. Returns (0, "") when the port is not a lateral-movement indicator.
+func lateralMovementSignal(dstPort uint16) (float64, string) {
+	switch dstPort {
+	case 445:
+		return 2.5, "lateral movement: SMB on internal network (port 445)"
+	case 3389:
+		return 2.5, "lateral movement: RDP on internal network (port 3389)"
+	case 5985:
+		return 2.0, "lateral movement: WinRM HTTP on internal network (port 5985)"
+	case 5986:
+		return 2.0, "lateral movement: WinRM HTTPS on internal network (port 5986)"
+	case 135:
+		return 2.0, "lateral movement: WMI/DCOM RPC on internal network (port 135)"
+	case 389:
+		return 1.5, "lateral movement: LDAP on internal network (port 389)"
+	case 636:
+		return 1.5, "lateral movement: LDAPS on internal network (port 636)"
+	case 22:
+		return 1.0, "internal SSH: potential lateral movement (port 22)"
+	}
+	return 0, ""
 }
 
 func score(key FlowKey, rec FlowRecord, ts []time.Time) (float64, []string) {
@@ -578,6 +686,54 @@ func score(key FlowKey, rec FlowRecord, ts []time.Time) (float64, []string) {
 	if rec.DurationMs > longLivedMs && len(ts) >= cfg.BeaconingMinPackets {
 		minutes := float64(rec.DurationMs) / 60000.0
 		add(0.5, fmt.Sprintf("long-lived connection: %.0f minutes with %d packets", minutes, len(ts)))
+	}
+
+	// ── QUIC (HTTP/3) from non-browser process ───────────────────────────────
+	if !cfg.DisableQUICScoring && rec.IsQUIC {
+		// Also honour the process exemption list so operators can silence
+		// known-good QUIC users (e.g. "node", "quiche-test") without disabling
+		// the entire QUIC signal.
+		if rec.ProcessName != "" &&
+			!isBrowserProcess(rec.ProcessName) &&
+			!isExemptedProcess(rec.ProcessName, cfg.ExemptedProcesses) {
+			add(1.5, fmt.Sprintf("QUIC connection from non-browser process: %s", rec.ProcessName))
+		}
+		if rec.GeoHighRisk {
+			add(1.0, fmt.Sprintf("QUIC connection to high-risk ASN: %s", rec.ASNOrg))
+		}
+	}
+
+	// ── Lateral movement (RFC1918 → RFC1918 on sensitive ports) ─────────────
+	if !cfg.DisableLateralMovementScoring && isPrivateIP(rec.SrcIP) && isPrivateIP(rec.DstIP) {
+		if pts, reason := lateralMovementSignal(key.DstPort); pts > 0 {
+			add(pts, reason)
+		}
+	}
+
+	// ── Protocol anomaly ─────────────────────────────────────────────────────
+	if !cfg.DisableProtocolAnomalyScoring {
+		// Non-TLS traffic on port 443: many TCP packets but no TLS ClientHello seen.
+		if key.Proto == "TCP" && key.DstPort == 443 && rec.PacketCount > 10 &&
+			rec.JA3Hash == "" && !rec.IsQUIC {
+			add(1.5, "non-TLS traffic on TCP port 443 — potential protocol tunnel")
+		}
+		// Excessive DNS over TCP: large data volume on port 53 suggests tunneling.
+		if key.DstPort == 53 && key.Proto == "TCP" && rec.ByteCount > 512*1024 {
+			add(1.5, fmt.Sprintf("excessive DNS over TCP: %.0f KB — potential DNS exfiltration",
+				float64(rec.ByteCount)/1024))
+		}
+	}
+
+	// ── DNS response analysis (NXDOMAIN storm, fast-flux TTL) ───────────────
+	if !cfg.DisableDNSExfilScoring {
+		if rec.NXDomainCount >= cfg.NXDomainStormThreshold {
+			add(2.0, fmt.Sprintf("dns nxdomain storm: %d NXDOMAIN responses — potential DGA activity",
+				rec.NXDomainCount))
+		}
+		if rec.MinDNSTTL > 0 && rec.MinDNSTTL < uint32(cfg.FastFluxTTLThreshold) {
+			add(1.5, fmt.Sprintf("low dns ttl=%d seconds — potential fast-flux or DGA domain",
+				rec.MinDNSTTL))
+		}
 	}
 
 	if total > 10.0 {

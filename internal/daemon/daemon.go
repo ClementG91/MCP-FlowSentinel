@@ -17,6 +17,8 @@ import (
 	"github.com/ClementG91/MCP-FlowSentinel/internal/config"
 	"github.com/ClementG91/MCP-FlowSentinel/internal/correlate"
 	"github.com/ClementG91/MCP-FlowSentinel/internal/history"
+	"github.com/ClementG91/MCP-FlowSentinel/internal/ja3"
+	"github.com/ClementG91/MCP-FlowSentinel/internal/metrics"
 )
 
 // ─── Runtime statistics ───────────────────────────────────────────────────────
@@ -27,9 +29,11 @@ var (
 	flowsScored  atomic.Int64
 	windowErrors atomic.Int64
 
-	startTimeMu sync.RWMutex
-	startTime   time.Time
-	activeIface string
+	startTimeMu   sync.RWMutex
+	startTime     time.Time
+	activeIface   string
+	activeIfacesMu sync.RWMutex
+	activeIfaces  []string
 )
 
 // Stats holds a snapshot of the daemon's runtime metrics.
@@ -38,6 +42,7 @@ type Stats struct {
 	StartTime       time.Time `json:"start_time,omitempty"`
 	UptimeSec       int64     `json:"uptime_seconds,omitempty"`
 	Interface       string    `json:"interface,omitempty"`
+	Interfaces      []string  `json:"interfaces,omitempty"`
 	IntervalSec     int       `json:"interval_seconds"`
 	WindowsRun      int64     `json:"windows_run"`
 	FlowsScored     int64     `json:"flows_scored"`
@@ -45,6 +50,7 @@ type Stats struct {
 	WebhookFailures int64     `json:"webhook_failures"`
 	WindowErrors    int64     `json:"window_errors"`
 	DroppedPackets  uint64    `json:"dropped_packets"`
+	JA3FeedSize     int       `json:"ja3_feed_size,omitempty"`
 }
 
 // GetStats returns a snapshot of the daemon's current runtime metrics.
@@ -54,9 +60,15 @@ func GetStats() Stats {
 	iface := activeIface
 	startTimeMu.RUnlock()
 
+	activeIfacesMu.RLock()
+	ifaces := make([]string, len(activeIfaces))
+	copy(ifaces, activeIfaces)
+	activeIfacesMu.RUnlock()
+
 	s := Stats{
 		Running:         running.Load(),
 		Interface:       iface,
+		Interfaces:      ifaces,
 		IntervalSec:     config.Get().Daemon.CaptureIntervalSec,
 		WindowsRun:      windowsRun.Load(),
 		FlowsScored:     flowsScored.Load(),
@@ -64,6 +76,7 @@ func GetStats() Stats {
 		WebhookFailures: alerting.WebhookFailures(),
 		WindowErrors:    windowErrors.Load(),
 		DroppedPackets:  capture.DroppedPackets(),
+		JA3FeedSize:     ja3.FeedSize(),
 	}
 	if !st.IsZero() {
 		s.StartTime = st
@@ -78,27 +91,47 @@ func GetStats() Stats {
 // Each window is CaptureIntervalSec seconds; flows are appended to history
 // and optionally sent to the configured webhook.
 func Run(ctx context.Context) error {
-	dcfg := config.Get().Daemon
+	cfg := config.Get()
+	dcfg := cfg.Daemon
 
-	iface := dcfg.Interface
-	if iface == "" {
+	// Resolve interface list — support both legacy single-interface and new list.
+	ifaces := resolveInterfaces(dcfg.Interface, dcfg.Interfaces)
+	if len(ifaces) == 0 {
 		auto, err := pickInterface()
 		if err != nil {
 			return fmt.Errorf("daemon: cannot auto-select interface: %w", err)
 		}
-		iface = auto
-		log.Printf("daemon: auto-selected interface %q", iface)
+		ifaces = []string{auto}
+		log.Printf("daemon: auto-selected interface %q", auto)
 	}
 
+	primaryIface := ifaces[0]
 	interval := time.Duration(dcfg.CaptureIntervalSec) * time.Second
-	log.Printf("daemon: monitoring %q every %s", iface, interval)
+	log.Printf("daemon: monitoring %v every %s", ifaces, interval)
 
 	running.Store(true)
 	startTimeMu.Lock()
 	startTime = time.Now()
-	activeIface = iface
+	activeIface = primaryIface
 	startTimeMu.Unlock()
+	activeIfacesMu.Lock()
+	activeIfaces = ifaces
+	activeIfacesMu.Unlock()
 	defer running.Store(false)
+
+	// Start Prometheus metrics server if enabled.
+	if cfg.Metrics.Enabled {
+		addr := cfg.Metrics.ListenAddr
+		if addr == "" {
+			addr = ":9200"
+		}
+		metrics.Serve(addr)
+	}
+
+	// Start JA3 feed updater if enabled.
+	if cfg.JA3Feed.Enabled && len(cfg.JA3Feed.URLs) > 0 {
+		go runJA3FeedUpdater(ctx, cfg.JA3Feed)
+	}
 
 	for {
 		select {
@@ -107,16 +140,45 @@ func Run(ctx context.Context) error {
 		default:
 		}
 
-		if err := runWindow(ctx, iface, dcfg.BPFFilter, interval); err != nil {
+		winStart := time.Now()
+		if err := runWindow(ctx, ifaces, dcfg.BPFFilter, interval); err != nil {
 			windowErrors.Add(1)
 			log.Printf("daemon: window error: %v", err)
+		}
+		metrics.RecordWindowDuration(time.Since(winStart).Milliseconds())
+		metrics.RecordDroppedPackets(capture.DroppedPackets())
+	}
+}
+
+// runJA3FeedUpdater performs an initial feed fetch then refreshes on a ticker.
+func runJA3FeedUpdater(ctx context.Context, jcfg config.JA3FeedConfig) {
+	// Immediate first fetch so the feed is populated before the first window.
+	if err := ja3.UpdateFeed(jcfg.URLs, jcfg.LocalFile); err != nil {
+		log.Printf("ja3feed: initial update failed: %v", err)
+	}
+	interval := time.Duration(jcfg.UpdateIntervalHours) * time.Hour
+	if interval <= 0 {
+		interval = 24 * time.Hour
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if err := ja3.UpdateFeed(jcfg.URLs, jcfg.LocalFile); err != nil {
+				log.Printf("ja3feed: periodic update failed: %v", err)
+			}
 		}
 	}
 }
 
-// runWindow captures one interval's worth of traffic, scores it, stores it
-// in history, and fires alerting for high-score flows.
-func runWindow(ctx context.Context, iface, bpfFilter string, dur time.Duration) error {
+// runWindow captures one interval's worth of traffic across all interfaces,
+// scores it, stores it in history, and fires alerting for high-score flows.
+// Each interface runs in its own goroutine; the aggregator is safe for
+// concurrent writes (sync.Map internally).
+func runWindow(ctx context.Context, ifaces []string, bpfFilter string, dur time.Duration) error {
 	winCtx, cancel := context.WithTimeout(ctx, dur)
 	defer cancel()
 
@@ -137,26 +199,39 @@ func runWindow(ctx context.Context, iface, bpfFilter string, dur time.Duration) 
 		}
 	}()
 
-	pktCh, err := capture.CapturePackets(winCtx, iface, bpfFilter)
-	if err != nil {
-		return err
-	}
-
 	agg := &aggregate.Aggregator{}
-	for pkt := range pktCh {
-		agg.Add(aggregate.PacketEvent{
-			SrcIP:      pkt.SrcIP,
-			DstIP:      pkt.DstIP,
-			SrcPort:    pkt.SrcPort,
-			DstPort:    pkt.DstPort,
-			Proto:      pkt.Proto,
-			PayloadLen: pkt.PayloadLen,
-			Timestamp:  pkt.Timestamp,
-			DNSQuery:   pkt.DNSQuery,
-			TLSSNIName: pkt.TLSSNIName,
-			JA3Hash:    pkt.JA3Hash,
-		})
+
+	// One capture goroutine per interface — all feed the same aggregator.
+	var wg sync.WaitGroup
+	for _, iface := range ifaces {
+		wg.Add(1)
+		go func(ifaceName string) {
+			defer wg.Done()
+			pktCh, err := capture.CapturePackets(winCtx, ifaceName, bpfFilter)
+			if err != nil {
+				log.Printf("daemon: capture %q: %v", ifaceName, err)
+				return
+			}
+			for pkt := range pktCh {
+				agg.Add(aggregate.PacketEvent{
+					SrcIP:         pkt.SrcIP,
+					DstIP:         pkt.DstIP,
+					SrcPort:       pkt.SrcPort,
+					DstPort:       pkt.DstPort,
+					Proto:         pkt.Proto,
+					PayloadLen:    pkt.PayloadLen,
+					Timestamp:     pkt.Timestamp,
+					DNSQuery:      pkt.DNSQuery,
+					TLSSNIName:    pkt.TLSSNIName,
+					JA3Hash:       pkt.JA3Hash,
+					IsQUIC:        pkt.IsQUIC,
+					DNSNXDomain:   pkt.DNSNXDomain,
+					DNSMinRespTTL: pkt.DNSMinRespTTL,
+				})
+			}
+		}(iface)
 	}
+	wg.Wait()
 
 	resolver := func(srcIP string, srcPort uint16, dstIP string, dstPort uint16, proto string) *aggregate.ProcessSnapshot {
 		tbl := tablePtr.Load()
@@ -188,13 +263,31 @@ func runWindow(ctx context.Context, iface, bpfFilter string, dur time.Duration) 
 	flowsScored.Add(int64(len(flows)))
 	windowsRun.Add(1)
 
-	history.Append("daemon:"+iface, flows)
+	source := "daemon:" + ifaces[0]
+	if len(ifaces) > 1 {
+		source = fmt.Sprintf("daemon:%d-interfaces", len(ifaces))
+	}
+	history.Append(source, flows)
 	alerting.Fire(flows)
 
 	summary := aggregate.Summarise(flows)
-	log.Printf("daemon: window done — %d flows  critical=%d high=%d medium=%d low=%d",
-		len(flows), summary.Critical, summary.High, summary.Medium, summary.Low)
+	metrics.RecordFlows(summary.Critical, summary.High, summary.Medium, summary.Low, 0)
+	log.Printf("daemon: window done — %d flows  critical=%d high=%d medium=%d low=%d ifaces=%v",
+		len(flows), summary.Critical, summary.High, summary.Medium, summary.Low, ifaces)
 
+	return nil
+}
+
+// resolveInterfaces returns the effective interface list from config.
+// Interfaces (new field) takes priority; Interface (legacy) is used when
+// Interfaces is empty; empty result means auto-selection is needed.
+func resolveInterfaces(single string, list []string) []string {
+	if len(list) > 0 {
+		return list
+	}
+	if single != "" {
+		return []string{single}
+	}
 	return nil
 }
 

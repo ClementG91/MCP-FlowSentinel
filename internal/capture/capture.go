@@ -33,9 +33,13 @@ type PacketEvent struct {
 	PayloadLen uint32
 	Timestamp  time.Time
 	// Optional enrichment — empty string means not present.
-	DNSQuery   string // first question name from a DNS/UDP-53 packet
-	TLSSNIName string // server name from TLS ClientHello
-	JA3Hash    string // JA3 fingerprint of TLS ClientHello, "" if not TLS
+	DNSQuery      string // first question name from a DNS/UDP-53 packet
+	TLSSNIName    string // server name from TLS ClientHello
+	JA3Hash       string // JA3 fingerprint of TLS ClientHello, "" if not TLS
+	IsQUIC        bool   // true when UDP 443 payload looks like a QUIC Initial packet
+	// DNS response enrichment (port-53 responses only).
+	DNSNXDomain   bool   // true when response code is NXDOMAIN (3)
+	DNSMinRespTTL uint32 // minimum A/AAAA record TTL in the response; 0 means no A/AAAA answers
 }
 
 // CapturePackets opens a live pcap handle on iface, applies an optional BPF
@@ -167,6 +171,10 @@ func parsePacket(pkt gopacket.Packet) *PacketEvent {
 		dstPort = uint16(tl.DstPort)
 		proto = "UDP"
 		payloadLen = uint32(len(tl.Payload))
+		// Store UDP payload for QUIC detection below.
+		if (srcPort == 443 || dstPort == 443) && len(tl.Payload) >= 5 {
+			tcpPayload = tl.Payload // reuse variable — only set for UDP 443
+		}
 	default:
 		return nil
 	}
@@ -186,18 +194,40 @@ func parsePacket(pkt gopacket.Packet) *PacketEvent {
 		Timestamp:  ts,
 	}
 
-	// DNS query extraction — UDP/TCP port 53.
+	// DNS query + response extraction — port 53 only.
 	if dstPort == 53 || srcPort == 53 {
 		event.DNSQuery = extractDNSQuery(pkt)
+		event.DNSNXDomain, event.DNSMinRespTTL = extractDNSResponse(pkt)
 	}
 
-	// TLS enrichment — SNI + JA3 fingerprint from ClientHello.
+	// TLS enrichment — SNI + JA3 fingerprint from ClientHello (TCP only).
 	if proto == "TCP" && len(tcpPayload) > 0 {
 		event.TLSSNIName = extractTLSSNI(tcpPayload)
 		event.JA3Hash = ja3.Fingerprint(tcpPayload)
 	}
 
+	// QUIC detection — UDP 443 with a QUIC Initial packet long-header.
+	if proto == "UDP" && (srcPort == 443 || dstPort == 443) {
+		event.IsQUIC = isQUICInitial(tcpPayload)
+	}
+
 	return event
+}
+
+// isQUICInitial returns true if the payload starts with a QUIC v1 Initial long
+// header. The check is intentionally lightweight: we look for the long-header
+// bit (0x80) and the QUIC v1 version field (0x00000001) at bytes 1–4. This
+// catches the overwhelming majority of QUIC connections without a full parser.
+func isQUICInitial(payload []byte) bool {
+	if len(payload) < 5 {
+		return false
+	}
+	// Long header: bit 7 must be set, bit 6 must be set (Fixed Bit for QUIC v1).
+	if payload[0]&0xC0 != 0xC0 {
+		return false
+	}
+	// QUIC version 1: bytes 1–4 = 0x00000001
+	return payload[1] == 0x00 && payload[2] == 0x00 && payload[3] == 0x00 && payload[4] == 0x01
 }
 
 // extractDNSQuery returns the first question name from a DNS packet, or "".
@@ -211,6 +241,39 @@ func extractDNSQuery(pkt gopacket.Packet) string {
 		return "" // skip responses and empty queries
 	}
 	return string(dns.Questions[0].Name)
+}
+
+// extractDNSResponse inspects a DNS response packet (QR=1) and returns:
+//   - nxdomain: true when the response code is NXDOMAIN (3)
+//   - minTTL:   the minimum TTL of all A/AAAA records in the answer section;
+//               0 means no A/AAAA records were present (e.g. pure NXDOMAIN)
+func extractDNSResponse(pkt gopacket.Packet) (nxdomain bool, minTTL uint32) {
+	dnsLayer := pkt.Layer(layers.LayerTypeDNS)
+	if dnsLayer == nil {
+		return
+	}
+	dns, _ := dnsLayer.(*layers.DNS)
+	if dns == nil || !dns.QR {
+		return // not a response
+	}
+	nxdomain = dns.ResponseCode == layers.DNSResponseCodeNXDomain
+	// Track minimum TTL using a "found" flag instead of 0 as sentinel, because
+	// TTL=0 is a valid value (instantaneous expiry, used in fast-flux DNS).
+	// Using 0 as "not set" would incorrectly allow later higher-TTL records to
+	// overwrite a legitimate TTL=0, causing us to miss the extreme fast-flux case.
+	found := false
+	for _, ans := range dns.Answers {
+		if ans.Type == layers.DNSTypeA || ans.Type == layers.DNSTypeAAAA {
+			if !found || ans.TTL < minTTL {
+				minTTL = ans.TTL
+				found = true
+			}
+		}
+	}
+	if !found {
+		minTTL = 0 // caller convention: 0 means no A/AAAA records present
+	}
+	return
 }
 
 // extractTLSSNI parses a raw TCP payload looking for a TLS ClientHello and

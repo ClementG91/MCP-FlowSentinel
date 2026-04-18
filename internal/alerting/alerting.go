@@ -9,11 +9,15 @@ package alerting
 
 import (
 	"bytes"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
 	"os"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -26,6 +30,89 @@ const (
 	maxRetries    = 3
 	retryBaseWait = time.Second
 )
+
+// ─── Token-bucket rate limiter ────────────────────────────────────────────────
+
+// rateLimiter is a simple token-bucket that allows up to maxPerMinute
+// webhook POSTs per minute with a burst equal to maxPerMinute.
+// A value of 0 means unlimited.
+type rateLimiter struct {
+	mu           sync.Mutex
+	tokens       int
+	max          int
+	lastRefill   time.Time
+}
+
+func newRateLimiter(maxPerMinute int) *rateLimiter {
+	return &rateLimiter{tokens: maxPerMinute, max: maxPerMinute, lastRefill: time.Now()}
+}
+
+// allow returns true and consumes a token if one is available.
+func (r *rateLimiter) allow() bool {
+	if r.max == 0 {
+		return true // unlimited
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	// Refill tokens proportionally to elapsed time (up to max).
+	now := time.Now()
+	elapsed := now.Sub(r.lastRefill)
+	if elapsed >= time.Minute {
+		r.tokens = r.max
+		r.lastRefill = now
+	} else if elapsed > 0 {
+		add := int(float64(r.max) * elapsed.Seconds() / 60.0)
+		if add > 0 {
+			r.tokens += add
+			if r.tokens > r.max {
+				r.tokens = r.max
+			}
+			r.lastRefill = now
+		}
+	}
+	if r.tokens <= 0 {
+		return false
+	}
+	r.tokens--
+	return true
+}
+
+// globalRateLimiter is rebuilt whenever Fire() reads the config.
+// It is replaced atomically via rateLimiterMu.
+var (
+	rateLimiterMu      sync.RWMutex
+	globalRateLimiter  = newRateLimiter(60) // default 60/min
+	rateLimiterLastMax int                  = 60
+)
+
+func getRateLimiter(maxPerMinute int) *rateLimiter {
+	rateLimiterMu.RLock()
+	if rateLimiterLastMax == maxPerMinute {
+		rl := globalRateLimiter
+		rateLimiterMu.RUnlock()
+		return rl
+	}
+	rateLimiterMu.RUnlock()
+
+	rateLimiterMu.Lock()
+	defer rateLimiterMu.Unlock()
+	if rateLimiterLastMax != maxPerMinute {
+		globalRateLimiter = newRateLimiter(maxPerMinute)
+		rateLimiterLastMax = maxPerMinute
+	}
+	return globalRateLimiter
+}
+
+// ─── HMAC signing ─────────────────────────────────────────────────────────────
+
+// signPayload returns the hex-encoded HMAC-SHA256 of body using secret.
+// The resulting string is suitable for the X-FlowSentinel-Signature header
+// in the format "sha256=<hex>".
+func signPayload(secret string, body []byte) string {
+	mac := hmac.New(sha256.New, []byte(secret))
+	mac.Write(body)
+	return "sha256=" + hex.EncodeToString(mac.Sum(nil))
+}
 
 // alert is the JSON body sent to the webhook endpoint.
 type alert struct {
@@ -91,12 +178,18 @@ func Fire(flows []aggregate.FlowRecord) {
 		return
 	}
 
+	rl := getRateLimiter(cfg.MaxAlertsPerMinute)
+
 	for _, f := range flows {
 		if f.SuspicionScore < cfg.MinScoreThreshold {
 			continue
 		}
 		key := flowDedupeKey(f)
 		if !shouldFire(key, cfg.DeduplicationWindowSec) {
+			continue
+		}
+		if !rl.allow() {
+			log.Printf("alerting: rate limit reached (%d/min) — dropping alert for %s", cfg.MaxAlertsPerMinute, key)
 			continue
 		}
 		severity := f.RiskLevel
@@ -107,11 +200,11 @@ func Fire(flows []aggregate.FlowRecord) {
 			DedupeKey: key,
 			Flow:      f,
 		})
-		go post(webhookURL, f, severity)
+		go post(webhookURL, cfg.WebhookSecret, f, severity)
 	}
 }
 
-func post(url string, flow aggregate.FlowRecord, severity string) {
+func post(url, secret string, flow aggregate.FlowRecord, severity string) {
 	body, err := json.Marshal(alert{
 		Source:    "mcp-flowsentinel",
 		Timestamp: time.Now().UTC(),
@@ -130,7 +223,16 @@ func post(url string, flow aggregate.FlowRecord, severity string) {
 			// Exponential back-off: 1s, 2s, 4s, …
 			time.Sleep(retryBaseWait << (attempt - 1))
 		}
-		resp, err := client.Post(url, "application/json", bytes.NewReader(body))
+		req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(body))
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		req.Header.Set("Content-Type", "application/json")
+		if secret != "" {
+			req.Header.Set("X-FlowSentinel-Signature", signPayload(secret, body))
+		}
+		resp, err := client.Do(req)
 		if err != nil {
 			lastErr = err
 			log.Printf("alerting: webhook POST attempt %d/%d failed: %v", attempt+1, maxRetries, err)
@@ -178,8 +280,17 @@ func FireTest(flow aggregate.FlowRecord) error {
 		return fmt.Errorf("marshal: %w", err)
 	}
 
+	req, err := http.NewRequest(http.MethodPost, webhookURL, bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("build request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if cfg.WebhookSecret != "" {
+		req.Header.Set("X-FlowSentinel-Signature", signPayload(cfg.WebhookSecret, body))
+	}
+
 	client := &http.Client{Timeout: 5 * time.Second}
-	resp, err := client.Post(webhookURL, "application/json", bytes.NewReader(body))
+	resp, err := client.Do(req)
 	if err != nil {
 		return fmt.Errorf("POST failed: %w", err)
 	}
