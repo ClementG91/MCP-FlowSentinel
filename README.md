@@ -2,9 +2,11 @@
 
 > **Ask your AI assistant: "What is making outbound connections right now — and is any of it suspicious?"**
 
-MCP-FlowSentinel is a [Model Context Protocol](https://modelcontextprotocol.io/) server that gives **any MCP-compatible AI assistant** deep, real-time visibility into your network traffic. It captures packets, maps every connection to the owning process, and runs 25+ detection signals — so you can ask your AI to investigate, explain, or alert on network activity in plain English.
+MCP-FlowSentinel is a [Model Context Protocol](https://modelcontextprotocol.io/) server that gives **any MCP-compatible AI assistant** real-time visibility into your network traffic. It captures packets, maps every connection to the owning process, and runs 30+ detection signals — so you can ask your AI to investigate, explain, or alert on network activity in plain English.
 
 Works with **Claude Desktop, Cursor, Cline, Continue.dev, Zed, Windsurf**, and any other client that supports the MCP stdio transport.
+
+> **How this was built:** this project was developed primarily through [vibe coding](https://en.wikipedia.org/wiki/Vibe_coding) — iterative AI-assisted development with Claude Code. The design, architecture decisions, and implementation were driven by prompting rather than traditional hand-coding. Security-sensitive components (packet parsers, scoring logic) have unit tests and fuzz tests, but the codebase has not undergone a formal third-party security audit. Use accordingly.
 
 ![CI](https://github.com/ClementG91/MCP-FlowSentinel/actions/workflows/ci.yml/badge.svg)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
@@ -244,7 +246,7 @@ Open VS Code settings (`Ctrl+,`), search for **Cline MCP**, click *Edit in setti
 
 ## Detection engine
 
-Each flow is scored **0–10** based on 25+ independent signals. Scores are capped at 10 and never go below 0. Every fired signal is recorded in `suspicion_reasons`; matched [MITRE ATT&CK](https://attack.mitre.org/) techniques are included in `mitre_techniques`.
+Each flow is scored based on 30+ independent signals. Scores start at 0 and have no hard cap (a flow matching many signals can exceed 10). Cross-flow bonus steps (scan detection, asymmetric upload) are capped at 10. Every fired signal is recorded in `suspicion_reasons`; matched [MITRE ATT&CK](https://attack.mitre.org/) techniques are included in `mitre_techniques`.
 
 ### Scoring signals
 
@@ -254,6 +256,7 @@ Each flow is scored **0–10** based on 25+ independent signals. Scores are capp
 | **JA3 TLS client fingerprint — known malware** | **+4.0** | Cobalt Strike, Meterpreter, Empire, Sliver, Dridex, TrickBot, Emotet, Havoc, BruteRatel, AsyncRAT … |
 | **JA3S TLS server fingerprint — known C2** | **+3.5** | Identifies C2 infrastructure even when implant randomises its ClientHello |
 | Beaconing — strong (inter-packet CV < 0.15, ≥ 5 pkts) | +3.5 | C2 heartbeat pattern |
+| Beaconing — possible (CV < 0.30) | +2.0 | Possible C2 heartbeat |
 | Port scan — confirmed (≥ 20 unique destinations) | +3.0 | Active network scan |
 | Known-bad HTTP User-Agent (Cobalt Strike, Meterpreter, Empire …) | +3.0 | Default C2 profile fingerprints |
 | HTTP CONNECT tunnel | +2.0 | Proxy-based C2 channel |
@@ -282,7 +285,8 @@ Each flow is scored **0–10** based on 25+ independent signals. Scores are capp
 | Long-lived connection (> 10 min with traffic) | +0.5 | Persistent C2 keepalive |
 | IPv6 fragmentation | +0.5 | Potential JA3 evasion via fragmentation |
 | Large transfer (> 5 MB) | +0.5 | Bulk exfiltration indicator |
-| Lateral movement to RFC1918 (SMB/RDP/WMI) | +2.5 | Internal network attack |
+| Very high transfer rate (> 20 MB/s, > 2 MB total) | +1.0 | Rapid exfiltration indicator |
+| Lateral movement to RFC1918 (SMB/RDP/WMI/LDAP/SSH) | +1.0–2.5 | Score depends on port: SMB/RDP=2.5, WinRM/WMI=2.0, LDAP=1.5, SSH=1.0 |
 
 All signals can be individually disabled via `disable_*_scoring` config flags. Low-scoring flows include a `clean_signals` array explaining why they look benign (standard port, resolved hostname, country, TLS SNI).
 
@@ -290,10 +294,10 @@ All signals can be individually disabled via `disable_*_scoring` config flags. L
 
 | Score | Level |
 |-------|-------|
-| 7–10  | `CRITICAL` |
-| 5–6.9 | `HIGH` |
-| 2–4.9 | `MEDIUM` |
-| 0–1.9 | `LOW` |
+| ≥ 7.0 | `CRITICAL` |
+| ≥ 5.0 | `HIGH` |
+| ≥ 2.0 | `MEDIUM` |
+| < 2.0 | `LOW` |
 
 ---
 

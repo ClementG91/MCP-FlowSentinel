@@ -150,32 +150,53 @@ Populated from the first HTTP/1.1 request observed in the flow. All fields omitt
 
 | Field | Type | Always present | Description |
 |---|---|---|---|
-| `suspicion_score` | number | yes | Continuous score ≥ 0. Typical thresholds: `< 2.0` = low, `2.0–4.9` = medium, `5.0–7.9` = high, `≥ 8.0` = critical |
+| `suspicion_score` | number | yes | Continuous score ≥ 0 with no hard cap. Many signals firing simultaneously can push scores above 10. Thresholds: `< 2.0` = low, `≥ 2.0` = medium, `≥ 5.0` = high, `≥ 7.0` = critical |
 | `risk_level` | string | yes | `"low"`, `"medium"`, `"high"`, or `"critical"` |
 | `suspicion_reasons` | string[] | when score > 0 | Human-readable explanation for each signal that contributed to the score |
 | `clean_signals` | string[] | when present | Signals that were evaluated but found benign (reduces false-positive noise) |
 
 ### Score signal reference
 
-| Signal | Score | Condition |
+Scores are taken directly from the source — see `internal/aggregate/aggregate.go` for the full list.
+
+| Signal | Score | Notes |
 |---|---|---|
-| Known-bad JA3 (client) | +5.0 | `ja3_known_bad` is set |
+| Known-bad JA3 (client) | +4.0 | `ja3_known_bad` is set |
+| Known-bad port (4444, 1337, 31337, 6666–6669…) | +4.0 | Metasploit defaults, back-connect shells |
 | Known-bad JA3S (server) | +3.5 | `ja3s_known_bad` is set |
+| Beaconing — strong (inter-packet CV < 0.15, ≥ 5 pkts) | +3.5 | C2 heartbeat pattern |
+| Suspicious HTTP User-Agent | +3.0 | Default C2 profile User-Agent strings |
+| Self-signed TLS certificate | +2.0 | `tls_cert_self_signed` = true |
 | Known-bad HASSH (SSH) | +2.5 | `hassh_known_bad` is set |
-| Self-signed TLS certificate | +3.0 | `tls_cert_self_signed` = true |
-| Expired TLS certificate | +2.0 | `tls_cert_expired` = true |
-| TLS cert with IP as CN | +2.5 | `tls_cert_ip_cn` = true |
-| Missing SAN on TLS cert | +1.0 | `tls_cert_has_san` = false (and cert is present) |
-| Short-lived TLS cert (≤ 30 days) | +1.5 | `tls_cert_valid_days` ≤ 30 |
-| High-risk country | +2.0 | `geo_high_risk` = true |
-| High NX domain rate | +3.0 | `nxdomain_count` / DNS total > 30% |
-| DNS fast-flux (TTL ≤ 5 s) | +2.0 | `min_dns_ttl` ≤ 5 (and > 0) |
-| Unusual port for protocol | +1.0–2.0 | TLS on non-443/8443, SSH on non-22, etc. |
-| IPv6 RH0 present | +3.0 | `is_ipv6_rh0` = true |
-| Large byte transfer | +1.0–3.0 | `byte_count` exceeds per-protocol thresholds |
-| QUIC exfil (high volume) | +1.5 | `is_quic` = true and `byte_count` > threshold |
-| Beaconing pattern | +2.5 | Periodic inter-packet timing detected |
-| Lateral movement (RFC 1918) | +3.5 | Both endpoints are private IPs |
+| Suspicious binary path (`/tmp`, AppData\Temp…) | +2.5 | `binary_path` matches known staging locations |
+| High-entropy DNS label (entropy > 3.5 or label > 40 chars) | +2.5 | `dns_queries` contains suspected DGA/exfil domain |
+| Lateral movement (RFC 1918 → RFC 1918) | +1.0–2.5 | Depends on port: SMB/RDP=2.5, WinRM/WMI=2.0, LDAP=1.5, SSH=1.0 |
+| HTTP CONNECT tunnel | +2.0 | `http_method` = CONNECT |
+| Beaconing — possible (CV < 0.30) | +2.0 | Possible C2 heartbeat |
+| Suspicious cmdline pattern | +2.0 | `cmdline` matches known attacker one-liners |
+| NXDOMAIN storm (≥ 5 NXDOMAIN responses) | +2.0 | `nxdomain_count` ≥ 5 |
+| Asymmetric upload (> 10× download) | +2.0 | Cross-flow detection; requires bidirectional flows |
+| Destination in high-risk ASN | +1.5 | `asn_org` matches bulletproof hoster list |
+| Expired TLS certificate | +1.5 | `tls_cert_expired` = true |
+| TLS certificate lifetime > 10 years | +1.5 | `tls_cert_valid_days` > 3650 |
+| Low DNS TTL (< 30 s) | +1.5 | `min_dns_ttl` > 0 and < 30 |
+| QUIC from non-browser process | +1.5 | `is_quic` = true and process is not a known browser |
+| HTTP on non-standard port | +1.5 | HTTP request on port that is not 80/8080 |
+| HTTP/2 on non-standard port | +1.5 | `is_http2` = true and port is not 443/8443 |
+| High-entropy HTTP URI | +1.5 | `http_uri` entropy indicates encoded C2 commands |
+| IPv6 RH0 present | +1.5 | `is_ipv6_rh0` = true |
+| Non-standard port (< 49152, not in standard list) | +1.0 | Low-noise signal, usually overridden by other signals |
+| TLS cert with IP as CN | +1.0 | `tls_cert_ip_cn` = true |
+| Unresolved binary path | +1.0 | Process path could not be read (possible process hiding) |
+| Very high transfer rate (> 20 MB/s, > 2 MB) | +1.0 | Rapid exfiltration indicator |
+| QUIC to high-risk ASN | +1.0 | `is_quic` = true and `geo_high_risk` = true |
+| No reverse DNS on public IP | +0.8 | `reverse_dns` is empty and `dst_ip` is a public IP |
+| Missing TLS SNI on port 443 (> 3 pkts) | +0.7 | Stealthy or non-standard TLS client |
+| Large transfer (> 5 MB) | +0.5 | `byte_count` > 5 MB |
+| Long-lived connection (> 10 min with traffic) | +0.5 | Persistent C2 keepalive indicator |
+| IPv6 fragmentation | +0.5 | `is_ipv6_fragment` = true |
+| DNS-over-HTTPS from non-browser | +0.5 | DoH provider SNI from a non-browser process |
+| Missing TLS SAN | +0.5 | `tls_cert_has_san` = false (and cert present) |
 
 ---
 
