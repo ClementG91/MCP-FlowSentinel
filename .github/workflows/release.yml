@@ -7,6 +7,7 @@ on:
 
 permissions:
   contents: write
+  id-token: write  # required for SLSA / SBOM attestation (future use)
 
 jobs:
   # ── Linux amd64 ──────────────────────────────────────────────────────────────
@@ -156,6 +157,20 @@ jobs:
         with:
           path: dist/
           merge-multiple: true
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+          cache: false  # no Go source on this runner, cache not needed
+
+      - name: Generate SBOM (SPDX JSON)
+        # syft generates a Software Bill of Materials from the Go module graph.
+        # The SPDX-JSON format is supported by GitHub's dependency submission API
+        # and all major SBOM consumers (Grype, TERN, DependencyTrack, etc.).
+        run: |
+          curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh | sh -s -- -b /usr/local/bin
+          syft . -o spdx-json=dist/sbom.spdx.json
+          echo "SBOM generated: $(wc -l < dist/sbom.spdx.json) lines"
 
       - name: Generate SHA256 checksums
         working-directory: dist
