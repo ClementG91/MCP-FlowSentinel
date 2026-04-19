@@ -59,9 +59,66 @@ type SocketTable struct {
 	byLocalPort map[string]*ProcessInfo  // "ip:port:proto" partial match
 }
 
+// ProcCache retains resolved process metadata across successive BuildSocketTable
+// calls. Only PIDs that appear for the first time are resolved via gopsutil;
+// PIDs that disappear from the connection list are pruned to prevent leaks.
+//
+// A single ProcCache should be created once (NewProcCache) and shared across
+// all BuildSocketTableCached calls in the same monitoring session.
+type ProcCache struct {
+	mu    sync.Mutex
+	procs map[int32]*ProcessInfo
+}
+
+// NewProcCache returns an initialised, empty ProcCache.
+func NewProcCache() *ProcCache {
+	return &ProcCache{procs: make(map[int32]*ProcessInfo, 64)}
+}
+
+// Size returns the number of PIDs currently held in the cache.
+// Primarily used for observability and tests.
+func (pc *ProcCache) Size() int {
+	pc.mu.Lock()
+	defer pc.mu.Unlock()
+	return len(pc.procs)
+}
+
+// get returns a cached entry and whether it was found.
+func (pc *ProcCache) get(pid int32) (*ProcessInfo, bool) {
+	info, ok := pc.procs[pid]
+	return info, ok
+}
+
+// set stores an entry in the cache.
+func (pc *ProcCache) set(pid int32, info *ProcessInfo) {
+	pc.procs[pid] = info
+}
+
+// pruneExcept removes every PID that is not in activePIDs.
+func (pc *ProcCache) pruneExcept(activePIDs map[int32]struct{}) {
+	for pid := range pc.procs {
+		if _, alive := activePIDs[pid]; !alive {
+			delete(pc.procs, pid)
+		}
+	}
+}
+
 // BuildSocketTable reads the current connection table via gopsutil and resolves
-// each PID to its process metadata.
+// each PID to its process metadata using a transient (per-call) process cache.
 func BuildSocketTable() *SocketTable {
+	return buildSocketTable(nil)
+}
+
+// BuildSocketTableCached is identical to BuildSocketTable but reuses process
+// metadata for PIDs that were already resolved in a previous call, reducing
+// gopsutil overhead significantly on repeated invocations.
+func BuildSocketTableCached(cache *ProcCache) *SocketTable {
+	return buildSocketTable(cache)
+}
+
+// buildSocketTable is the shared implementation. When cache is nil, a transient
+// local process cache is used (matching the original BuildSocketTable behaviour).
+func buildSocketTable(cache *ProcCache) *SocketTable {
 	t := &SocketTable{
 		byConn:      make(map[connKey]*ProcessInfo),
 		byLocalPort: make(map[string]*ProcessInfo),
@@ -72,10 +129,27 @@ func BuildSocketTable() *SocketTable {
 		return t // return empty table on error; caller handles gracefully
 	}
 
-	procCache := make(map[int32]*ProcessInfo, 64)
+	// localCache is the map passed to resolveProcess. When cache is provided we
+	// copy its contents in, operate on the local map, then write back and prune.
+	var localCache map[int32]*ProcessInfo
+	if cache != nil {
+		cache.mu.Lock()
+		// Copy the current cache contents so we can work without holding the lock
+		// across the (potentially slow) gopsutil calls.
+		localCache = make(map[int32]*ProcessInfo, len(cache.procs)+16)
+		for k, v := range cache.procs {
+			localCache[k] = v
+		}
+		cache.mu.Unlock()
+	} else {
+		localCache = make(map[int32]*ProcessInfo, 64)
+	}
+
+	activePIDs := make(map[int32]struct{}, len(conns))
 
 	for _, c := range conns {
-		info := resolveProcess(c.Pid, procCache)
+		activePIDs[c.Pid] = struct{}{}
+		info := resolveProcess(c.Pid, localCache)
 		proto := protoName(c.Type)
 
 		key := connKey{
@@ -98,6 +172,16 @@ func BuildSocketTable() *SocketTable {
 				t.byLocalPort[wk] = info
 			}
 		}
+	}
+
+	// Write back resolved entries and prune stale PIDs.
+	if cache != nil {
+		cache.mu.Lock()
+		for pid, info := range localCache {
+			cache.procs[pid] = info
+		}
+		cache.pruneExcept(activePIDs)
+		cache.mu.Unlock()
 	}
 
 	return t

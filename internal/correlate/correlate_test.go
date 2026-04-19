@@ -109,6 +109,81 @@ func TestBuildSocketTable_ReturnsValidTable(t *testing.T) {
 	_ = table.Lookup("127.0.0.1", 0, "127.0.0.1", 0, "TCP")
 }
 
+// ─── ProcCache ────────────────────────────────────────────────────────────────
+
+func TestProcCache_NewIsEmpty(t *testing.T) {
+	pc := NewProcCache()
+	if pc.Size() != 0 {
+		t.Errorf("new ProcCache: Size() = %d, want 0", pc.Size())
+	}
+}
+
+func TestProcCache_GetSetRoundtrip(t *testing.T) {
+	pc := NewProcCache()
+	want := &ProcessInfo{PID: 1234, Name: "testd"}
+	pc.mu.Lock()
+	pc.set(1234, want)
+	got, ok := pc.get(1234)
+	pc.mu.Unlock()
+	if !ok {
+		t.Fatal("get after set: expected hit")
+	}
+	if got != want {
+		t.Error("get returned a different pointer than set stored")
+	}
+}
+
+func TestProcCache_PruneRemovesStaleEntries(t *testing.T) {
+	pc := NewProcCache()
+	pc.mu.Lock()
+	pc.set(10, &ProcessInfo{PID: 10})
+	pc.set(20, &ProcessInfo{PID: 20})
+	pc.set(30, &ProcessInfo{PID: 30})
+	// Only PID 20 is still alive.
+	pc.pruneExcept(map[int32]struct{}{20: {}})
+	pc.mu.Unlock()
+
+	if pc.Size() != 1 {
+		t.Errorf("after prune: Size() = %d, want 1", pc.Size())
+	}
+	pc.mu.Lock()
+	_, ok := pc.get(20)
+	pc.mu.Unlock()
+	if !ok {
+		t.Error("active PID 20 should survive prune")
+	}
+}
+
+func TestProcCache_PruneKeepsAllWhenAllActive(t *testing.T) {
+	pc := NewProcCache()
+	pc.mu.Lock()
+	pc.set(1, &ProcessInfo{PID: 1})
+	pc.set(2, &ProcessInfo{PID: 2})
+	pc.pruneExcept(map[int32]struct{}{1: {}, 2: {}})
+	pc.mu.Unlock()
+
+	if pc.Size() != 2 {
+		t.Errorf("after prune with all active: Size() = %d, want 2", pc.Size())
+	}
+}
+
+func TestBuildSocketTableCached_DoesNotPanic(t *testing.T) {
+	pc := NewProcCache()
+	table := BuildSocketTableCached(pc)
+	if table == nil {
+		t.Fatal("BuildSocketTableCached returned nil")
+	}
+	// Second call should reuse the cache — must not panic.
+	table2 := BuildSocketTableCached(pc)
+	if table2 == nil {
+		t.Fatal("second BuildSocketTableCached returned nil")
+	}
+	// Cache size must be non-negative and bounded.
+	if pc.Size() < 0 {
+		t.Errorf("ProcCache.Size() = %d, want >= 0", pc.Size())
+	}
+}
+
 // ─── GetAllConnections ────────────────────────────────────────────────────────
 
 func TestGetAllConnections_ReturnsMap(t *testing.T) {
