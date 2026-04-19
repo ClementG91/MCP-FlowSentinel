@@ -236,6 +236,8 @@ func runWindow(ctx context.Context, ifaces []string, bpfFilter string, dur time.
 					HTTPUserAgent: pkt.HTTPUserAgent,
 					HTTPURI:       pkt.HTTPURI,
 					TLSCertInfo:   pkt.TLSCertInfo,
+					JA3SHash:      pkt.JA3SHash,
+					HasshHash:     pkt.HasshHash,
 				})
 			}
 		}(iface)

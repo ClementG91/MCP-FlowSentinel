@@ -136,9 +136,14 @@ type FlowRecord struct {
 	GeoHighRisk bool     `json:"geo_high_risk,omitempty"`
 	TLSSNIName  string   `json:"tls_sni,omitempty"`
 	DNSQueries  []string `json:"dns_queries,omitempty"`
-	// JA3 TLS fingerprinting
-	JA3Hash     string `json:"ja3_hash,omitempty"`     // MD5 of TLS ClientHello parameters
-	JA3KnownBad string `json:"ja3_known_bad,omitempty"` // malware family if hash matches known-bad list
+	// JA3 / JA3S TLS fingerprinting
+	JA3Hash        string `json:"ja3_hash,omitempty"`         // MD5 of TLS ClientHello parameters (client fingerprint)
+	JA3KnownBad    string `json:"ja3_known_bad,omitempty"`    // malware family if ClientHello hash matches known-bad list
+	JA3SHash       string `json:"ja3s_hash,omitempty"`        // MD5 of TLS ServerHello parameters (server fingerprint)
+	JA3SKnownBad   string `json:"ja3s_known_bad,omitempty"`   // C2 server family if ServerHello hash matches known-bad list
+	// SSH HASSH fingerprinting
+	HasshHash      string `json:"hassh_hash,omitempty"`       // MD5 of SSH_MSG_KEXINIT algorithm lists
+	HasshKnownBad  string `json:"hassh_known_bad,omitempty"`  // offensive library name if HASSH matches known-bad list
 	// QUIC / transport enrichment
 	IsQUIC  bool `json:"is_quic,omitempty"`  // true when at least one QUIC Initial packet was observed
 	IsHTTP2 bool `json:"is_http2,omitempty"` // true when HTTP/2 client preface was observed
@@ -188,6 +193,8 @@ type flowState struct {
 	dnsQueries    map[string]struct{} // unique DNS query names observed for this flow
 	tlsNames      map[string]struct{} // unique TLS SNI names observed for this flow
 	ja3Hash       string              // first JA3 fingerprint observed for this flow
+	ja3sHash      string              // first JA3S fingerprint observed for this flow (server)
+	hasshHash     string              // first HASSH fingerprint observed for this flow (SSH client)
 	isQUIC        bool                // any packet in this flow was a QUIC Initial
 	nxdomainCount int                 // number of NXDOMAIN responses in this flow
 	minDNSTTL     uint32              // minimum A/AAAA TTL from DNS responses; 0 = not seen
@@ -223,6 +230,8 @@ type PacketEvent struct {
 	DNSQuery      string // first question name from a DNS packet (optional)
 	TLSSNIName    string // server name from TLS ClientHello (optional)
 	JA3Hash       string // JA3 fingerprint of TLS ClientHello (optional)
+	JA3SHash      string // JA3S fingerprint of TLS ServerHello (optional)
+	HasshHash     string // HASSH fingerprint of SSH_MSG_KEXINIT (optional)
 	IsQUIC        bool   // true when UDP 443 payload is a QUIC Initial packet
 	DNSNXDomain   bool   // DNS response returned NXDOMAIN
 	DNSMinRespTTL uint32 // minimum A/AAAA TTL from DNS response (0 = no answers)
@@ -277,6 +286,12 @@ func (a *Aggregator) Add(pkt PacketEvent) {
 	}
 	if pkt.JA3Hash != "" && fs.ja3Hash == "" {
 		fs.ja3Hash = pkt.JA3Hash // keep only the first seen ClientHello per flow
+	}
+	if pkt.JA3SHash != "" && fs.ja3sHash == "" {
+		fs.ja3sHash = pkt.JA3SHash // first seen ServerHello per flow
+	}
+	if pkt.HasshHash != "" && fs.hasshHash == "" {
+		fs.hasshHash = pkt.HasshHash // first seen SSH KEXINIT per flow
 	}
 	if pkt.IsQUIC {
 		fs.isQUIC = true
@@ -352,6 +367,8 @@ func (a *Aggregator) Finalize(resolver ProcessResolver) []FlowRecord {
 		}
 
 		ja3h := fs.ja3Hash
+		ja3sh := fs.ja3sHash
+		hasshH := fs.hasshHash
 		isQUIC := fs.isQUIC
 		isHTTP2 := fs.isHTTP2
 		isGRPC := fs.isGRPC
@@ -377,6 +394,8 @@ func (a *Aggregator) Finalize(resolver ProcessResolver) []FlowRecord {
 			DNSQueries:    dnsSlice,
 			TLSSNIName:    sniName,
 			JA3Hash:       ja3h,
+			JA3SHash:      ja3sh,
+			HasshHash:     hasshH,
 			IsQUIC:         isQUIC,
 			IsHTTP2:        isHTTP2,
 			IsGRPC:         isGRPC,
@@ -444,6 +463,16 @@ func (a *Aggregator) Finalize(resolver ProcessResolver) []FlowRecord {
 		if items[i].rec.JA3Hash != "" {
 			if family, ok := ja3.LookupWithFeed(items[i].rec.JA3Hash, extraJA3); ok {
 				items[i].rec.JA3KnownBad = family
+			}
+		}
+		if items[i].rec.JA3SHash != "" {
+			if family, ok := ja3.LookupServer(items[i].rec.JA3SHash); ok {
+				items[i].rec.JA3SKnownBad = family
+			}
+		}
+		if items[i].rec.HasshHash != "" {
+			if desc, ok := capture.LookupHASH(items[i].rec.HasshHash); ok {
+				items[i].rec.HasshKnownBad = desc
 			}
 		}
 	}
@@ -703,9 +732,23 @@ func score(key FlowKey, rec FlowRecord, ts []time.Time) (float64, []string) {
 		}
 	}
 
-	// ── JA3 TLS fingerprint ─────────────────────────────────────────────────
+	// ── JA3 TLS fingerprint (client) ────────────────────────────────────────
 	if !cfg.DisableJA3Scoring && rec.JA3KnownBad != "" {
 		add(4.0, fmt.Sprintf("JA3 fingerprint matches known malware: %s [%s]", rec.JA3KnownBad, rec.JA3Hash))
+	}
+
+	// ── JA3S TLS fingerprint (server) ───────────────────────────────────────
+	// JA3S fingerprints the ServerHello — identifies C2 server infrastructure
+	// even when the implant randomises its ClientHello.
+	if !cfg.DisableJA3Scoring && rec.JA3SKnownBad != "" {
+		add(3.5, fmt.Sprintf("JA3S server fingerprint matches known C2 infrastructure: %s [%s]", rec.JA3SKnownBad, rec.JA3SHash))
+	}
+
+	// ── SSH HASSH fingerprint ────────────────────────────────────────────────
+	// Offensive Python SSH libraries (Paramiko, AsyncSSH) are routinely used
+	// in credential-stuffing, lateral movement, and C2 over SSH.
+	if rec.HasshKnownBad != "" {
+		add(2.5, fmt.Sprintf("SSH client fingerprint (HASSH) matches offensive library: %s [%s]", rec.HasshKnownBad, rec.HasshHash))
 	}
 
 	// ── GeoIP / threat intelligence ─────────────────────────────────────────

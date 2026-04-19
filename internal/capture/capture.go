@@ -53,6 +53,10 @@ type PacketEvent struct {
 	IsIPv6Fragment bool // true when an IPv6 Fragment Header was observed
 	// TLS server certificate (TCP 443 only, from ServerCertificate message).
 	TLSCertInfo *CertInfo // non-nil when a server certificate was successfully parsed
+	// JA3S — TLS ServerHello fingerprint (server-side complement to JA3).
+	JA3SHash string // MD5 of TLS ServerHello parameters; "" if not a ServerHello
+	// HASSH — SSH client key-exchange fingerprint (TCP port 22 only).
+	HasshHash string // MD5 of SSH_MSG_KEXINIT algorithm lists; "" if not SSH KEXINIT
 }
 
 const (
@@ -311,9 +315,16 @@ func parsePacket(pkt gopacket.Packet) *PacketEvent {
 		event.TLSSNIName = extractTLSSNI(tcpPayload)
 		event.JA3Hash = ja3.Fingerprint(tcpPayload)
 
-		// TLS ServerCertificate: cert anomaly detection (inbound on 443/8443).
+		// TLS ServerHello: JA3S fingerprint + cert anomaly detection (inbound on 443/8443).
 		if srcPort == 443 || srcPort == 8443 {
+			event.JA3SHash = ja3.FingerprintServer(tcpPayload)
 			event.TLSCertInfo = extractServerCert(tcpPayload)
+		}
+
+		// SSH HASSH: fingerprint the client SSH_MSG_KEXINIT on port 22.
+		// Detects offensive Python/C SSH libraries regardless of banner.
+		if dstPort == 22 || srcPort == 22 {
+			event.HasshHash = ExtractHASH(tcpPayload)
 		}
 
 		// HTTP/2 preface detection.
