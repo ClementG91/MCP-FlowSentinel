@@ -1,4 +1,4 @@
-//go:build !windows
+//go:build linux
 
 package tools
 
@@ -8,8 +8,9 @@ import (
 	"github.com/shirou/gopsutil/v3/process"
 )
 
-// collectModulesUnix reads /proc/<PID>/maps (Linux) or the mach vm region
-// table (macOS) via gopsutil to return distinct shared-library paths.
+// collectModulesUnix reads /proc/<PID>/maps via gopsutil to return distinct
+// shared-library paths. Only available on Linux where MemoryMapsStat has a
+// Path field; other platforms return nil via scan_process_notlinux.go.
 func collectModulesUnix(p *process.Process) []string {
 	maps, err := p.MemoryMaps(true) // grouped=true: one entry per path
 	if err != nil || maps == nil {
