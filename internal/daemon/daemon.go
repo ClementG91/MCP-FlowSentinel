@@ -20,6 +20,7 @@ import (
 	"github.com/ClementG91/MCP-FlowSentinel/internal/config"
 	"github.com/ClementG91/MCP-FlowSentinel/internal/correlate"
 	"github.com/ClementG91/MCP-FlowSentinel/internal/history"
+	"github.com/ClementG91/MCP-FlowSentinel/internal/intel"
 	"github.com/ClementG91/MCP-FlowSentinel/internal/ja3"
 	"github.com/ClementG91/MCP-FlowSentinel/internal/metrics"
 )
@@ -136,6 +137,16 @@ func Run(ctx context.Context) error {
 		go runJA3FeedUpdater(ctx, cfg.JA3Feed)
 	}
 
+	// Start HASSH feed updater if enabled.
+	if cfg.HasshFeed.Enabled && (len(cfg.HasshFeed.URLs) > 0 || cfg.HasshFeed.LocalFile != "") {
+		go runHasshFeedUpdater(ctx, cfg.HasshFeed)
+	}
+
+	// Start IP reputation feed updater if enabled.
+	if cfg.IPRep.Enabled && (len(cfg.IPRep.URLs) > 0 || cfg.IPRep.LocalFile != "") {
+		go runIPRepUpdater(ctx, cfg.IPRep)
+	}
+
 	// Initialise behavioural baseline from persisted state.
 	// The cache directory mirrors the XDG_CACHE_HOME convention.
 	baseline.Init(baselineCacheDir())
@@ -159,6 +170,52 @@ func Run(ctx context.Context) error {
 		}
 		metrics.RecordWindowDuration(time.Since(winStart).Milliseconds())
 		metrics.RecordDroppedPackets(capture.DroppedPackets())
+	}
+}
+
+// runHasshFeedUpdater performs an initial HASSH feed fetch then refreshes on a ticker.
+func runHasshFeedUpdater(ctx context.Context, hcfg config.HasshFeedConfig) {
+	if err := capture.UpdateHasshFeed(hcfg.URLs, hcfg.LocalFile); err != nil {
+		log.Printf("hasshfeed: initial update failed: %v", err)
+	}
+	interval := time.Duration(hcfg.UpdateIntervalHours) * time.Hour
+	if interval <= 0 {
+		interval = 24 * time.Hour
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if err := capture.UpdateHasshFeed(hcfg.URLs, hcfg.LocalFile); err != nil {
+				log.Printf("hasshfeed: periodic update failed: %v", err)
+			}
+		}
+	}
+}
+
+// runIPRepUpdater performs an initial IP reputation feed fetch then refreshes on a ticker.
+func runIPRepUpdater(ctx context.Context, ircfg config.IPRepConfig) {
+	if err := intel.UpdateIPRep(ircfg.URLs, ircfg.LocalFile); err != nil {
+		log.Printf("iprep: initial update failed: %v", err)
+	}
+	interval := time.Duration(ircfg.UpdateIntervalHours) * time.Hour
+	if interval <= 0 {
+		interval = 24 * time.Hour
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if err := intel.UpdateIPRep(ircfg.URLs, ircfg.LocalFile); err != nil {
+				log.Printf("iprep: periodic update failed: %v", err)
+			}
+		}
 	}
 }
 

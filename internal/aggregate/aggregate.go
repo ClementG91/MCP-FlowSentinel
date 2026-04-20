@@ -167,6 +167,8 @@ type FlowRecord struct {
 	TLSCertSubjectCN   string `json:"tls_cert_cn,omitempty"`
 	TLSCertHasSAN      bool   `json:"tls_cert_has_san,omitempty"`
 	TLSCertIsIPCN      bool   `json:"tls_cert_ip_cn,omitempty"`
+	// IP reputation (blocklist match)
+	IPRepLabel string `json:"ip_rep_label,omitempty"` // non-empty when dst IP matches a threat-intel blocklist
 	// Analysis fields
 	SuspicionScore   float64  `json:"suspicion_score"`
 	RiskLevel        string   `json:"risk_level"`
@@ -472,9 +474,12 @@ func (a *Aggregator) Finalize(resolver ProcessResolver) []FlowRecord {
 			}
 		}
 		if items[i].rec.HasshHash != "" {
-			if desc, ok := capture.LookupHASH(items[i].rec.HasshHash); ok {
+			if desc, ok := capture.LookupHASHWithFeed(items[i].rec.HasshHash); ok {
 				items[i].rec.HasshKnownBad = desc
 			}
+		}
+		if label, ok := intel.IPRepLookup(items[i].rec.DstIP); ok {
+			items[i].rec.IPRepLabel = label
 		}
 	}
 
@@ -873,6 +878,13 @@ func score(key FlowKey, rec FlowRecord, ts []time.Time) (float64, []string) {
 	// ── SSH HASSH fingerprint → c2 category ─────────────────────────────────
 	if rec.HasshKnownBad != "" {
 		addTo(&sm.c2, 2.5, fmt.Sprintf("SSH client fingerprint (HASSH) matches offensive library: %s [%s]", rec.HasshKnownBad, rec.HasshHash))
+	}
+
+	// ── IP reputation (threat-intel blocklist) → c2 category ────────────────
+	// A direct hit on a Feodo Tracker / Emerging Threats C2 blocklist is a
+	// strong indicator; route to the c2 bucket so it compounds with JA3/HASSH.
+	if rec.IPRepLabel != "" {
+		addTo(&sm.c2, 2.5, fmt.Sprintf("destination IP on threat-intel blocklist: %s", rec.IPRepLabel))
 	}
 
 	// ── GeoIP / threat intelligence ─────────────────────────────────────────

@@ -20,15 +20,17 @@ import (
 
 // Config is the root configuration object.
 type Config struct {
-	Scoring  ScoringConfig  `yaml:"scoring"`
-	Capture  CaptureConfig  `yaml:"capture"`
-	GeoIP    GeoIPConfig    `yaml:"geoip"`
-	History  HistoryConfig  `yaml:"history"`
-	Alerting AlertingConfig `yaml:"alerting"`
-	Daemon   DaemonConfig   `yaml:"daemon"`
-	JA3Feed  JA3FeedConfig  `yaml:"ja3_feed"`
-	Metrics  MetricsConfig  `yaml:"metrics"`
-	Intel    IntelConfig    `yaml:"intel"`
+	Scoring   ScoringConfig   `yaml:"scoring"`
+	Capture   CaptureConfig   `yaml:"capture"`
+	GeoIP     GeoIPConfig     `yaml:"geoip"`
+	History   HistoryConfig   `yaml:"history"`
+	Alerting  AlertingConfig  `yaml:"alerting"`
+	Daemon    DaemonConfig    `yaml:"daemon"`
+	JA3Feed   JA3FeedConfig   `yaml:"ja3_feed"`
+	HasshFeed HasshFeedConfig `yaml:"hassh_feed"`
+	IPRep     IPRepConfig     `yaml:"ip_rep"`
+	Metrics   MetricsConfig   `yaml:"metrics"`
+	Intel     IntelConfig     `yaml:"intel"`
 }
 
 // ScoringConfig controls every detection-engine threshold.
@@ -194,6 +196,32 @@ type JA3FeedConfig struct {
 	LocalFile string `yaml:"local_file"`
 }
 
+// HasshFeedConfig controls the dynamic HASSH threat-intel feed.
+type HasshFeedConfig struct {
+	// Enabled controls whether the feed is fetched and used. Default: false.
+	Enabled bool `yaml:"enabled"`
+	// UpdateIntervalHours is how often the remote feeds are refreshed. Default: 24.
+	UpdateIntervalHours int `yaml:"update_interval_hours"`
+	// URLs is the list of remote CSV feeds to fetch. Each must return a CSV
+	// where column 0 is a 32-char MD5 hex hash and column 1 is a description.
+	URLs []string `yaml:"urls"`
+	// LocalFile is an optional path to a local CSV file (hash,description).
+	LocalFile string `yaml:"local_file"`
+}
+
+// IPRepConfig controls the IP reputation blocklist feeds.
+type IPRepConfig struct {
+	// Enabled controls whether remote blocklists are fetched. Default: false.
+	Enabled bool `yaml:"enabled"`
+	// UpdateIntervalHours is how often the blocklists are refreshed. Default: 24.
+	UpdateIntervalHours int `yaml:"update_interval_hours"`
+	// URLs lists remote plain-text IP/CIDR blocklist sources.
+	// Supported formats: Feodo Tracker, Emerging Threats, any newline-delimited list.
+	URLs []string `yaml:"urls"`
+	// LocalFile is an optional local plain-text file (one IP or CIDR per line).
+	LocalFile string `yaml:"local_file"`
+}
+
 // IntelConfig holds external threat-intelligence API keys and settings.
 type IntelConfig struct {
 	// VirusTotalAPIKey enables VirusTotal file reputation lookups in scan_process.
@@ -254,6 +282,18 @@ func Default() *Config {
 			UpdateIntervalHours: 24,
 			URLs: []string{
 				"https://sslbl.abuse.ch/blacklist/ja3_fingerprints.csv",
+			},
+		},
+		HasshFeed: HasshFeedConfig{
+			Enabled:             false,
+			UpdateIntervalHours: 24,
+		},
+		IPRep: IPRepConfig{
+			Enabled:             false,
+			UpdateIntervalHours: 24,
+			URLs: []string{
+				"https://feodotracker.abuse.ch/downloads/ipblocklist.txt",
+				"https://rules.emergingthreats.net/fwrules/emerging-Block-IPs.txt",
 			},
 		},
 		Metrics: MetricsConfig{
@@ -516,6 +556,36 @@ func mergeOverDefaults(dst, override *Config) {
 	}
 	if ojf.LocalFile != "" {
 		jf.LocalFile = ojf.LocalFile
+	}
+
+	hf := &dst.HasshFeed
+	ohf := &override.HasshFeed
+	if ohf.Enabled {
+		hf.Enabled = true
+	}
+	if ohf.UpdateIntervalHours != 0 {
+		hf.UpdateIntervalHours = ohf.UpdateIntervalHours
+	}
+	if len(ohf.URLs) > 0 {
+		hf.URLs = ohf.URLs
+	}
+	if ohf.LocalFile != "" {
+		hf.LocalFile = ohf.LocalFile
+	}
+
+	ir := &dst.IPRep
+	oir := &override.IPRep
+	if oir.Enabled {
+		ir.Enabled = true
+	}
+	if oir.UpdateIntervalHours != 0 {
+		ir.UpdateIntervalHours = oir.UpdateIntervalHours
+	}
+	if len(oir.URLs) > 0 {
+		ir.URLs = oir.URLs
+	}
+	if oir.LocalFile != "" {
+		ir.LocalFile = oir.LocalFile
 	}
 
 	m := &dst.Metrics
@@ -839,6 +909,28 @@ ja3_feed:
   urls:
     - "https://sslbl.abuse.ch/blacklist/ja3_fingerprints.csv"
   local_file: ""                   # Optional local CSV override (hash,description)
+
+# ─── HASSH Dynamic Threat Feed ────────────────────────────────────────────────
+# Fetches HASSH fingerprint lists for offensive SSH libraries.
+# No major public feed exists yet — use local_file to supply your own list.
+# CSV format: hash,description  (same as JA3 feed)
+hassh_feed:
+  enabled: false
+  update_interval_hours: 24
+  # urls:
+  #   - "https://example.com/hassh_blacklist.csv"
+  local_file: ""   # Optional path to local CSV (hash,description)
+
+# ─── IP Reputation / C2 Blocklists ────────────────────────────────────────────
+# Fetches known C2 server and botnet IP blocklists.
+# When a destination IP matches, the flow gets +2.5 in the c2 scoring category.
+ip_rep:
+  enabled: false
+  update_interval_hours: 24
+  urls:
+    - "https://feodotracker.abuse.ch/downloads/ipblocklist.txt"
+    - "https://rules.emergingthreats.net/fwrules/emerging-Block-IPs.txt"
+  local_file: ""   # Optional local file (one IP or CIDR per line)
 
 # ─── Prometheus Metrics ────────────────────────────────────────────────────────
 # Exposes a /metrics endpoint for Prometheus scraping.
