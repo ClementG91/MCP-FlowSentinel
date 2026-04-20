@@ -70,6 +70,11 @@ type ScoringConfig struct {
 	// monitoring agents that exhibit beacon-like traffic patterns.
 	ExemptedProcesses []string `yaml:"exempted_processes"`
 
+	// DevToolProcesses lists additional process names to treat as developer
+	// tools. Dev tools get a higher scan/NXDOMAIN threshold and skip QUIC
+	// scoring. Built-in list covers node, python, go, docker, kubectl, etc.
+	DevToolProcesses []string `yaml:"dev_tool_processes"`
+
 	// DNS response analysis thresholds.
 	// NXDomainStormThreshold is the minimum number of NXDOMAIN responses in a
 	// single flow before it is flagged as a potential DGA/C2 NXDOMAIN storm.
@@ -370,6 +375,9 @@ func mergeOverDefaults(dst, override *Config) {
 	}
 	if len(o.ExemptedProcesses) > 0 {
 		s.ExemptedProcesses = o.ExemptedProcesses
+	}
+	if len(o.DevToolProcesses) > 0 {
+		s.DevToolProcesses = o.DevToolProcesses
 	}
 	// Kill-switches: false is the default, so only true overrides.
 	if o.DisableBinaryPathScoring {

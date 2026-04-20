@@ -693,8 +693,11 @@ func TestScore_HighByteCount_AddsReason(t *testing.T) {
 }
 
 func TestScore_CapAt10_IsEnforced(t *testing.T) {
-	// Stack: knownBadPort(4.0) + suspiciousPath(2.5) + suspiciousCmdline(2.0)
-	// + geoHighRisk(1.5) + noRDNS(0.8) = 10.8 → must be capped at 10.
+	// With categorical scoring the process bucket (path 2.5 + cmdline 2.0) is
+	// capped at 3.5, so the same combination now produces:
+	//   c2=4.0  process=3.5  network=2.3 → total=9.8 (≤10.0 ✓)
+	// The important invariant is score ≤ 10.0; the exact value depends on which
+	// categories fire.
 	key := FlowKey{SrcIP: "10.0.0.1", DstIP: "203.0.113.1", DstPort: 4444, Proto: "TCP"}
 	rec := makeRec(
 		withPID(1234),
@@ -707,8 +710,42 @@ func TestScore_CapAt10_IsEnforced(t *testing.T) {
 		},
 	)
 	s, _ := score(key, rec, nil)
+	if s > 10.0 {
+		t.Errorf("score must never exceed 10.0, got %.2f", s)
+	}
+	if s <= 0 {
+		t.Errorf("expected non-zero score, got %.2f", s)
+	}
+}
+
+func TestScore_HardCapAt10_MultiCategory(t *testing.T) {
+	// Saturate multiple categories to verify the hard 10.0 cap is enforced.
+	// c2: JA3KnownBad(4.0)+JA3SKnownBad(3.5) → capped at 6.0
+	// tls: self-signed(2.0)+expired(1.5) → 3.5
+	// process: path(2.5)+cmdline(2.0) → capped at 3.5
+	// network: geo(1.5)+noRDNS(0.8) → 2.3
+	// Sum without hard cap: 6.0+3.5+3.5+2.3 = 15.3 → hard-capped at 10.0
+	key := FlowKey{SrcIP: "10.0.0.1", DstIP: "203.0.113.1", DstPort: 4444, Proto: "TCP"}
+	rec := makeRec(
+		withPID(1234),
+		withBinaryPath("/tmp/evil"),
+		withCmdline("python3 -c 'import socket'"),
+		func(r *FlowRecord) {
+			r.GeoHighRisk = true
+			r.ASNOrg = "Shady ASN"
+			r.DstIP = "203.0.113.1"
+			r.JA3KnownBad = "Cobalt Strike"
+			r.JA3Hash = "deadbeef00112233deadbeef00112233"
+			r.JA3SKnownBad = "C2 infra"
+			r.JA3SHash = "aabbccdd11223344aabbccdd11223344"
+			r.TLSCertSelfSigned = true
+			r.TLSCertSubjectCN = "localhost"
+			r.TLSCertExpired = true
+		},
+	)
+	s, _ := score(key, rec, nil)
 	if s != 10.0 {
-		t.Errorf("score should be capped at 10.0, got %.2f", s)
+		t.Errorf("fully-saturated score should be exactly 10.0, got %.2f", s)
 	}
 }
 

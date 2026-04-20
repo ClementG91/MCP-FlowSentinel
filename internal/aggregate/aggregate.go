@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ClementG91/MCP-FlowSentinel/internal/baseline"
 	"github.com/ClementG91/MCP-FlowSentinel/internal/cache"
 	"github.com/ClementG91/MCP-FlowSentinel/internal/capture"
 	"github.com/ClementG91/MCP-FlowSentinel/internal/config"
@@ -636,6 +637,128 @@ func isBrowserProcess(name string) bool {
 	return false
 }
 
+// ─── Process context classification ──────────────────────────────────────────
+
+// procCtx classifies the owning process into broad behavioural categories so
+// that signals irrelevant to that category can be masked (reducing false positives).
+type procCtx int
+
+const (
+	ctxDefault procCtx = iota // unknown / general process
+	ctxBrowser                // web browsers (Chrome, Firefox, …)
+	ctxSystem                 // OS daemons and kernel threads
+	ctxDevTool                // developer toolchains, container runtimes
+)
+
+// knownSystemProcesses are OS services that exhibit beacon-like heartbeats and
+// long-lived connections by design (NTP, syslog, journald, etc.).
+var knownSystemProcesses = map[string]bool{
+	"svchost": true, "system": true, "wininit": true, "lsass": true,
+	"services": true, "ntoskrnl": true, "smss": true, "csrss": true,
+	"winlogon": true, "spoolsv": true, "lsm": true,
+	"systemd": true, "init": true, "kworker": true, "ksoftirqd": true,
+	"ntpd": true, "chronyd": true, "timedatectl": true,
+	"sshd": true, "cron": true, "crond": true, "atd": true,
+	"rsyslogd": true, "syslogd": true, "journald": true,
+	"networkd": true, "resolved": true, "timesyncd": true,
+	"dbus-daemon": true, "avahi-daemon": true, "cupsd": true,
+}
+
+// knownDevToolProcesses are developer tool processes that make many outbound
+// connections to registries, APIs, and build caches as normal behaviour.
+var knownDevToolProcesses = map[string]bool{
+	"node": true, "nodejs": true, "npm": true, "npx": true,
+	"yarn": true, "pnpm": true, "bun": true, "deno": true,
+	"python": true, "python2": true, "python3": true,
+	"ruby": true, "gem": true, "bundle": true,
+	"go": true, "cargo": true, "rustc": true, "rustup": true,
+	"java": true, "javac": true, "mvn": true, "gradle": true,
+	"dotnet": true, "nuget": true,
+	"code": true, "code-server": true,
+	"docker": true, "containerd": true, "podman": true,
+	"kubectl": true, "minikube": true, "kind": true,
+	"terraform": true, "packer": true, "vagrant": true,
+	"ansible": true, "ansible-playbook": true,
+	"git": true, "gh": true, "hub": true,
+}
+
+// processContext returns the behavioural category for the given process name.
+func processContext(name string, cfg config.ScoringConfig) procCtx {
+	if name == "" {
+		return ctxDefault
+	}
+	if isBrowserProcess(name) {
+		return ctxBrowser
+	}
+	lower := strings.ToLower(name)
+	if knownSystemProcesses[lower] {
+		return ctxSystem
+	}
+	if knownDevToolProcesses[lower] {
+		return ctxDevTool
+	}
+	for _, dt := range cfg.DevToolProcesses {
+		if strings.ToLower(dt) == lower {
+			return ctxDevTool
+		}
+	}
+	return ctxDefault
+}
+
+// ─── Categorical scoring ──────────────────────────────────────────────────────
+
+// scoreBucket accumulates points for one signal category, capped at a maximum.
+type scoreBucket struct {
+	total float64
+	cap   float64
+}
+
+// add attempts to add pts to the bucket. If the bucket is full it silently
+// discards the excess (returns false when nothing was added).
+func (b *scoreBucket) add(pts float64) bool {
+	remaining := b.cap - b.total
+	if remaining <= 0 {
+		return false
+	}
+	if pts > remaining {
+		pts = remaining
+	}
+	b.total += pts
+	return true
+}
+
+// scoreMap groups all signal buckets for one flow.
+type scoreMap struct {
+	c2         scoreBucket // known-bad fingerprints, direct C2 indicators
+	tls        scoreBucket // TLS certificate anomalies
+	behavioral scoreBucket // beaconing, long-lived connections
+	dns        scoreBucket // DNS exfil, NXDOMAIN storms, fast-flux
+	process    scoreBucket // binary path, cmdline patterns
+	network    scoreBucket // ports, geo, protocol anomalies, QUIC, HTTP
+}
+
+// newScoreMap returns a scoreMap with per-category caps.
+func newScoreMap() scoreMap {
+	return scoreMap{
+		c2:         scoreBucket{cap: 6.0},
+		tls:        scoreBucket{cap: 3.5},
+		behavioral: scoreBucket{cap: 4.0},
+		dns:        scoreBucket{cap: 3.0},
+		process:    scoreBucket{cap: 3.5},
+		network:    scoreBucket{cap: 5.0},
+	}
+}
+
+// total returns the sum of all category scores, hard-capped at 10.0.
+func (m *scoreMap) total() float64 {
+	sum := m.c2.total + m.tls.total + m.behavioral.total +
+		m.dns.total + m.process.total + m.network.total
+	if sum > 10.0 {
+		return 10.0
+	}
+	return sum
+}
+
 // lateralMovementSignal returns a (score, reason) for RFC1918→RFC1918 traffic on
 // sensitive ports. Returns (0, "") when the port is not a lateral-movement indicator.
 func lateralMovementSignal(dstPort uint16) (float64, string) {
@@ -662,12 +785,19 @@ func lateralMovementSignal(dstPort uint16) (float64, string) {
 
 func score(key FlowKey, rec FlowRecord, ts []time.Time) (float64, []string) {
 	cfg := config.Get().Scoring
-	var total float64
+	sm := newScoreMap()
 	var reasons []string
 
-	add := func(pts float64, reason string) {
-		total += pts
-		reasons = append(reasons, reason)
+	// Classify the owning process — drives signal masking below.
+	pctx := processContext(rec.ProcessName, cfg)
+	exempted := isExemptedProcess(rec.ProcessName, cfg.ExemptedProcesses)
+
+	// addTo adds pts to the given bucket and appends the reason string.
+	// If the bucket is already saturated the reason is silently dropped.
+	addTo := func(b *scoreBucket, pts float64, reason string) {
+		if b.add(pts) {
+			reasons = append(reasons, reason)
+		}
 	}
 
 	// ── Port analysis ───────────────────────────────────────────────────────
@@ -695,16 +825,17 @@ func score(key FlowKey, rec FlowRecord, ts []time.Time) (float64, []string) {
 			}
 		}
 		if why, bad := effectiveBadPorts[key.DstPort]; bad {
-			add(4.0, fmt.Sprintf("known high-risk port %d (%s)", key.DstPort, why))
+			// Known C2/malware port → c2 category (strong indicator on its own).
+			addTo(&sm.c2, 4.0, fmt.Sprintf("known high-risk port %d (%s)", key.DstPort, why))
 		} else if key.DstPort < 49152 && !effectiveStdPorts[key.DstPort] {
-			add(1.0, fmt.Sprintf("non-standard port %d", key.DstPort))
+			addTo(&sm.network, 1.0, fmt.Sprintf("non-standard port %d", key.DstPort))
 		}
 	}
 
 	// ── Reverse DNS analysis ────────────────────────────────────────────────
 	if !cfg.DisableReverseDNSScoring {
 		if rec.ReverseDNS == "" && !isPrivateIP(rec.DstIP) {
-			add(0.8, "no reverse DNS — direct IP connection")
+			addTo(&sm.network, 0.8, "no reverse DNS — direct IP connection")
 		}
 	}
 
@@ -712,7 +843,7 @@ func score(key FlowKey, rec FlowRecord, ts []time.Time) (float64, []string) {
 	if !cfg.DisableDNSExfilScoring {
 		for _, q := range rec.DNSQueries {
 			if isHighEntropyDomain(q) {
-				add(2.5, fmt.Sprintf("possible DNS exfiltration: high-entropy query %q", q))
+				addTo(&sm.dns, 2.5, fmt.Sprintf("possible DNS exfiltration: high-entropy query %q", q))
 				break // one penalty per flow
 			}
 		}
@@ -720,233 +851,219 @@ func score(key FlowKey, rec FlowRecord, ts []time.Time) (float64, []string) {
 
 	// ── TLS SNI analysis ────────────────────────────────────────────────────
 	if !cfg.DisableSNIScoring && key.Proto == "TCP" {
-		// Missing SNI on an encrypted port is suspicious: legitimate TLS
-		// clients always send SNI; C2 frameworks sometimes omit it.
 		if rec.TLSSNIName == "" && (key.DstPort == 443 || key.DstPort == 8443) && rec.PacketCount > 3 {
-			add(0.7, "TLS traffic on HTTPS port without SNI — potential evasion or non-standard TLS")
+			addTo(&sm.network, 0.7, "TLS traffic on HTTPS port without SNI — potential evasion or non-standard TLS")
 		}
-		// Connection to a known DoH provider may indicate DNS tunneling or
-		// covert use of DNS-over-HTTPS by a non-browser process.
-		if rec.TLSSNIName != "" && dohProviders[strings.ToLower(rec.TLSSNIName)] {
-			add(0.5, fmt.Sprintf("connection to DNS-over-HTTPS provider: %s", rec.TLSSNIName))
+		// DoH scoring is masked for browsers — they use DoH intentionally.
+		if rec.TLSSNIName != "" && dohProviders[strings.ToLower(rec.TLSSNIName)] && pctx != ctxBrowser {
+			addTo(&sm.network, 0.5, fmt.Sprintf("connection to DNS-over-HTTPS provider: %s", rec.TLSSNIName))
 		}
 	}
 
-	// ── JA3 TLS fingerprint (client) ────────────────────────────────────────
+	// ── JA3 TLS fingerprint (client) → c2 category ──────────────────────────
 	if !cfg.DisableJA3Scoring && rec.JA3KnownBad != "" {
-		add(4.0, fmt.Sprintf("JA3 fingerprint matches known malware: %s [%s]", rec.JA3KnownBad, rec.JA3Hash))
+		addTo(&sm.c2, 4.0, fmt.Sprintf("JA3 fingerprint matches known malware: %s [%s]", rec.JA3KnownBad, rec.JA3Hash))
 	}
 
-	// ── JA3S TLS fingerprint (server) ───────────────────────────────────────
-	// JA3S fingerprints the ServerHello — identifies C2 server infrastructure
-	// even when the implant randomises its ClientHello.
+	// ── JA3S TLS fingerprint (server) → c2 category ─────────────────────────
 	if !cfg.DisableJA3Scoring && rec.JA3SKnownBad != "" {
-		add(3.5, fmt.Sprintf("JA3S server fingerprint matches known C2 infrastructure: %s [%s]", rec.JA3SKnownBad, rec.JA3SHash))
+		addTo(&sm.c2, 3.5, fmt.Sprintf("JA3S server fingerprint matches known C2 infrastructure: %s [%s]", rec.JA3SKnownBad, rec.JA3SHash))
 	}
 
-	// ── SSH HASSH fingerprint ────────────────────────────────────────────────
-	// Offensive Python SSH libraries (Paramiko, AsyncSSH) are routinely used
-	// in credential-stuffing, lateral movement, and C2 over SSH.
+	// ── SSH HASSH fingerprint → c2 category ─────────────────────────────────
 	if rec.HasshKnownBad != "" {
-		add(2.5, fmt.Sprintf("SSH client fingerprint (HASSH) matches offensive library: %s [%s]", rec.HasshKnownBad, rec.HasshHash))
+		addTo(&sm.c2, 2.5, fmt.Sprintf("SSH client fingerprint (HASSH) matches offensive library: %s [%s]", rec.HasshKnownBad, rec.HasshHash))
 	}
 
 	// ── GeoIP / threat intelligence ─────────────────────────────────────────
 	if !cfg.DisableGeoScoring && rec.GeoHighRisk {
-		add(1.5, fmt.Sprintf("destination in high-risk ASN: %s", rec.ASNOrg))
+		addTo(&sm.network, 1.5, fmt.Sprintf("destination in high-risk ASN: %s", rec.ASNOrg))
 	}
 
 	// ── Process / binary analysis ───────────────────────────────────────────
-	if !cfg.DisableBinaryPathScoring {
-		if !isExemptedProcess(rec.ProcessName, cfg.ExemptedProcesses) {
-			if rec.PID > 0 && rec.BinaryPath == "" {
-				add(1.0, "could not resolve binary path for PID")
-			}
-			effectivePaths := suspiciousPathPrefixes
-			if len(cfg.ExtraSuspiciousPaths) > 0 {
-				effectivePaths = append(effectivePaths, cfg.ExtraSuspiciousPaths...)
-			}
-			for _, prefix := range effectivePaths {
-				if strings.Contains(rec.BinaryPath, prefix) {
-					add(2.5, fmt.Sprintf("binary running from suspicious path: %s", rec.BinaryPath))
-					break
-				}
+	if !cfg.DisableBinaryPathScoring && !exempted {
+		if rec.PID > 0 && rec.BinaryPath == "" {
+			addTo(&sm.process, 1.0, "could not resolve binary path for PID")
+		}
+		effectivePaths := suspiciousPathPrefixes
+		if len(cfg.ExtraSuspiciousPaths) > 0 {
+			effectivePaths = append(effectivePaths, cfg.ExtraSuspiciousPaths...)
+		}
+		for _, prefix := range effectivePaths {
+			if strings.Contains(rec.BinaryPath, prefix) {
+				addTo(&sm.process, 2.5, fmt.Sprintf("binary running from suspicious path: %s", rec.BinaryPath))
+				break
 			}
 		}
 	}
 
 	// ── Cmdline analysis ────────────────────────────────────────────────────
 	if !cfg.DisableCmdlineScoring && rec.Cmdline != "" {
-		// Use pre-compiled patterns (compiled once at config load, not per-flow).
 		effectivePatterns := suspiciousCmdlinePatterns
 		if len(cfg.CompiledExtraCmdlinePatterns) > 0 {
 			effectivePatterns = append(effectivePatterns, cfg.CompiledExtraCmdlinePatterns...)
 		}
 		for _, re := range effectivePatterns {
 			if re.MatchString(rec.Cmdline) {
-				add(2.0, fmt.Sprintf("suspicious cmdline pattern %q in: %s", re.String(), rec.Cmdline))
+				addTo(&sm.process, 2.0, fmt.Sprintf("suspicious cmdline pattern %q in: %s", re.String(), rec.Cmdline))
 				break
 			}
 		}
 	}
 
 	// ── Beaconing detection ─────────────────────────────────────────────────
-	if !cfg.DisableBeaconingScoring && !isExemptedProcess(rec.ProcessName, cfg.ExemptedProcesses) {
+	// System services (NTP, journald, etc.) have inherently regular heartbeats
+	// — mask beaconing to avoid constant false positives on system processes.
+	if !cfg.DisableBeaconingScoring && !exempted && pctx != ctxSystem {
 		if bs, reason := beaconingScore(ts, cfg); bs > 0 {
-			add(bs, reason)
+			addTo(&sm.behavioral, bs, reason)
 		}
 	}
 
 	// ── High data volume ────────────────────────────────────────────────────
 	if rec.ByteCount > 5*1024*1024 {
-		add(0.5, fmt.Sprintf("high data transfer: %.1f MB", float64(rec.ByteCount)/1024/1024))
+		addTo(&sm.network, 0.5, fmt.Sprintf("high data transfer: %.1f MB", float64(rec.ByteCount)/1024/1024))
 	}
 
 	// ── High transfer rate (potential rapid exfiltration) ───────────────────
-	// Only score when duration is meaningful (> 1 s) and data volume is significant.
 	if rec.DurationMs > 1000 && rec.ByteCount > 2*1024*1024 {
 		bps := float64(rec.ByteCount) / (float64(rec.DurationMs) / 1000.0)
-		if bps > 20*1024*1024 { // > 20 MB/s sustained outbound
-			add(1.0, fmt.Sprintf("very high transfer rate: %.0f MB/s — potential rapid exfiltration", bps/1024/1024))
+		if bps > 20*1024*1024 {
+			addTo(&sm.network, 1.0, fmt.Sprintf("very high transfer rate: %.0f MB/s — potential rapid exfiltration", bps/1024/1024))
 		}
 	}
 
 	// ── Long-lived connection ────────────────────────────────────────────────
-	// A connection open for > 10 minutes with regular traffic is a strong C2
-	// indicator when combined with other signals.
-	const longLivedMs = 10 * 60 * 1000 // 10 min
-	if rec.DurationMs > longLivedMs && len(ts) >= cfg.BeaconingMinPackets {
+	// System services (sshd, chronyd) keep connections open indefinitely by
+	// design — suppress for ctxSystem to avoid noise.
+	const longLivedMs = 10 * 60 * 1000
+	if rec.DurationMs > longLivedMs && len(ts) >= cfg.BeaconingMinPackets && pctx != ctxSystem {
 		minutes := float64(rec.DurationMs) / 60000.0
-		add(0.5, fmt.Sprintf("long-lived connection: %.0f minutes with %d packets", minutes, len(ts)))
+		addTo(&sm.behavioral, 0.5, fmt.Sprintf("long-lived connection: %.0f minutes with %d packets", minutes, len(ts)))
 	}
 
-	// ── QUIC (HTTP/3) from non-browser process ───────────────────────────────
+	// ── QUIC (HTTP/3) from non-browser / non-devtool process ─────────────────
+	// Browsers and dev tools (e.g. Deno, Bun) legitimately use QUIC.
 	if !cfg.DisableQUICScoring && rec.IsQUIC {
-		// Also honour the process exemption list so operators can silence
-		// known-good QUIC users (e.g. "node", "quiche-test") without disabling
-		// the entire QUIC signal.
 		if rec.ProcessName != "" &&
-			!isBrowserProcess(rec.ProcessName) &&
-			!isExemptedProcess(rec.ProcessName, cfg.ExemptedProcesses) {
-			add(1.5, fmt.Sprintf("QUIC connection from non-browser process: %s", rec.ProcessName))
+			pctx != ctxBrowser && pctx != ctxDevTool &&
+			!exempted {
+			addTo(&sm.network, 1.5, fmt.Sprintf("QUIC connection from non-browser process: %s", rec.ProcessName))
 		}
 		if rec.GeoHighRisk {
-			add(1.0, fmt.Sprintf("QUIC connection to high-risk ASN: %s", rec.ASNOrg))
+			addTo(&sm.network, 1.0, fmt.Sprintf("QUIC connection to high-risk ASN: %s", rec.ASNOrg))
 		}
 	}
 
 	// ── Lateral movement (RFC1918 → RFC1918 on sensitive ports) ─────────────
 	if !cfg.DisableLateralMovementScoring && isPrivateIP(rec.SrcIP) && isPrivateIP(rec.DstIP) {
 		if pts, reason := lateralMovementSignal(key.DstPort); pts > 0 {
-			add(pts, reason)
+			addTo(&sm.network, pts, reason)
 		}
 	}
 
 	// ── Protocol anomaly ─────────────────────────────────────────────────────
 	if !cfg.DisableProtocolAnomalyScoring {
-		// Non-TLS traffic on port 443: many TCP packets but no TLS ClientHello seen.
 		if key.Proto == "TCP" && key.DstPort == 443 && rec.PacketCount > 10 &&
 			rec.JA3Hash == "" && !rec.IsQUIC {
-			add(1.5, "non-TLS traffic on TCP port 443 — potential protocol tunnel")
+			addTo(&sm.network, 1.5, "non-TLS traffic on TCP port 443 — potential protocol tunnel")
 		}
-		// Excessive DNS over TCP: large data volume on port 53 suggests tunneling.
 		if key.DstPort == 53 && key.Proto == "TCP" && rec.ByteCount > 512*1024 {
-			add(1.5, fmt.Sprintf("excessive DNS over TCP: %.0f KB — potential DNS exfiltration",
+			addTo(&sm.dns, 1.5, fmt.Sprintf("excessive DNS over TCP: %.0f KB — potential DNS exfiltration",
 				float64(rec.ByteCount)/1024))
 		}
 	}
 
 	// ── DNS response analysis (NXDOMAIN storm, fast-flux TTL) ───────────────
+	// Dev tools hit many package-registry domains that may not exist (404/NXDOMAIN)
+	// during dependency resolution. Apply a 2× higher threshold for dev tools.
 	if !cfg.DisableDNSExfilScoring {
-		if rec.NXDomainCount >= cfg.NXDomainStormThreshold {
-			add(2.0, fmt.Sprintf("dns nxdomain storm: %d NXDOMAIN responses — potential DGA activity",
+		nxThreshold := cfg.NXDomainStormThreshold
+		if pctx == ctxDevTool && nxThreshold > 0 {
+			nxThreshold *= 2
+		}
+		if rec.NXDomainCount >= nxThreshold {
+			addTo(&sm.dns, 2.0, fmt.Sprintf("dns nxdomain storm: %d NXDOMAIN responses — potential DGA activity",
 				rec.NXDomainCount))
 		}
 		if rec.MinDNSTTL > 0 && rec.MinDNSTTL < uint32(cfg.FastFluxTTLThreshold) {
-			add(1.5, fmt.Sprintf("low dns ttl=%d seconds — potential fast-flux or DGA domain",
+			addTo(&sm.dns, 1.5, fmt.Sprintf("low dns ttl=%d seconds — potential fast-flux or DGA domain",
 				rec.MinDNSTTL))
 		}
 	}
 
 	// ── HTTP/1.1 layer analysis ──────────────────────────────────────────────
 	if !cfg.DisableHTTPScoring && rec.HTTPMethod != "" {
-		// HTTP CONNECT tunnelling — proxy abuse or C2 over HTTP.
 		if rec.HTTPMethod == "CONNECT" {
-			add(2.0, "HTTP CONNECT tunnel — potential proxy/C2 channel")
+			addTo(&sm.network, 2.0, "HTTP CONNECT tunnel — potential proxy/C2 channel")
 		}
-		// Known-malicious User-Agent strings (C2 framework defaults).
 		if rec.HTTPUserAgent != "" && capture.IsKnownBadUserAgent(rec.HTTPUserAgent) {
-			add(3.0, fmt.Sprintf("suspicious HTTP User-Agent: %q", truncateStr(rec.HTTPUserAgent, 80)))
+			addTo(&sm.c2, 3.0, fmt.Sprintf("suspicious HTTP User-Agent: %q", truncateStr(rec.HTTPUserAgent, 80)))
 		}
-		// Missing / very short User-Agent — unusual for legitimate browsers.
 		if len(rec.HTTPUserAgent) < 5 {
-			add(1.0, "empty or minimal HTTP User-Agent")
+			addTo(&sm.network, 1.0, "empty or minimal HTTP User-Agent")
 		}
-		// HTTP on a non-standard port (not 80, 8080, 8000, 8888, 3000).
 		if !capture.IsStandardHTTPPort(key.DstPort) && key.DstPort != 443 {
-			add(1.5, fmt.Sprintf("HTTP traffic on non-standard port %d", key.DstPort))
+			addTo(&sm.network, 1.5, fmt.Sprintf("HTTP traffic on non-standard port %d", key.DstPort))
 		}
-		// High-entropy URI path — common in C2 check-in beacons.
 		if rec.HTTPURI != "" && capture.IsHighEntropyURI(rec.HTTPURI) {
-			add(1.5, fmt.Sprintf("high-entropy HTTP URI: %s", truncateStr(rec.HTTPURI, 60)))
+			addTo(&sm.network, 1.5, fmt.Sprintf("high-entropy HTTP URI: %s", truncateStr(rec.HTTPURI, 60)))
 		}
 	}
 
 	// ── HTTP/2 on non-standard port ──────────────────────────────────────────
 	if !cfg.DisableHTTPScoring && rec.IsHTTP2 && key.DstPort != 443 && key.DstPort != 8443 {
-		add(1.5, fmt.Sprintf("HTTP/2 on non-standard port %d — potential C2 (e.g. Sliver gRPC)", key.DstPort))
+		addTo(&sm.network, 1.5, fmt.Sprintf("HTTP/2 on non-standard port %d — potential C2 (e.g. Sliver gRPC)", key.DstPort))
 	}
+
 	// ── gRPC frame pattern ───────────────────────────────────────────────────
 	if !cfg.DisableHTTPScoring && rec.IsGRPC {
-		// Informational: gRPC itself is not malicious, but combined with a
-		// non-standard port or no TLS (IsHTTP2 on port != 443) it deserves a
-		// bump so the flow surfaces in results.
 		if key.DstPort != 443 && key.DstPort != 8443 {
-			add(1.0, fmt.Sprintf("gRPC traffic on non-standard port %d — verify expected service", key.DstPort))
+			addTo(&sm.network, 1.0, fmt.Sprintf("gRPC traffic on non-standard port %d — verify expected service", key.DstPort))
 		} else {
-			add(0.5, "gRPC traffic detected (informational)")
+			addTo(&sm.network, 0.5, "gRPC traffic detected (informational)")
 		}
 	}
 
 	// ── IPv6 extension header anomalies ─────────────────────────────────────
-	// Routing Header type 0 was deprecated by RFC 5095 (2007) as it allows
-	// source-routing amplification attacks; legitimate stacks never send it.
 	if rec.IsIPv6RH0 {
-		add(1.5, "IPv6 Routing Header type 0 (deprecated per RFC 5095) — potential source-routing abuse")
+		addTo(&sm.network, 1.5, "IPv6 Routing Header type 0 (deprecated per RFC 5095) — potential source-routing abuse")
 	}
-	// IPv6 fragmentation on its own is not malicious but warrants logging as
-	// fragmented ClientHellos evade JA3 fingerprinting.
 	if rec.IsIPv6Fragment {
-		add(0.5, "IPv6 fragmentation detected — possible JA3 evasion or reassembly-based bypass")
+		addTo(&sm.network, 0.5, "IPv6 fragmentation detected — possible JA3 evasion or reassembly-based bypass")
 	}
 
-	// ── TLS certificate anomalies ────────────────────────────────────────────
+	// ── TLS certificate anomalies → tls category ─────────────────────────────
 	if !cfg.DisableCertScoring {
 		if rec.TLSCertSelfSigned {
 			cn := rec.TLSCertSubjectCN
 			if cn == "" {
 				cn = "(no CN)"
 			}
-			add(2.0, fmt.Sprintf("self-signed TLS certificate (CN=%s)", cn))
+			addTo(&sm.tls, 2.0, fmt.Sprintf("self-signed TLS certificate (CN=%s)", cn))
 		}
 		if rec.TLSCertExpired {
-			add(1.5, "expired TLS certificate")
+			addTo(&sm.tls, 1.5, "expired TLS certificate")
 		}
-		if rec.TLSCertValidDays > 3650 { // > 10 years — typical C2 default
-			add(1.5, fmt.Sprintf("suspicious certificate lifetime: %d days (>10 years)", rec.TLSCertValidDays))
+		if rec.TLSCertValidDays > 3650 {
+			addTo(&sm.tls, 1.5, fmt.Sprintf("suspicious certificate lifetime: %d days (>10 years)", rec.TLSCertValidDays))
 		}
 		if rec.TLSCertIsIPCN {
-			add(1.0, fmt.Sprintf("TLS certificate CN is an IP address: %s", rec.TLSCertSubjectCN))
+			addTo(&sm.tls, 1.0, fmt.Sprintf("TLS certificate CN is an IP address: %s", rec.TLSCertSubjectCN))
 		}
 		if rec.TLSCertSubjectCN != "" && !rec.TLSCertHasSAN && !rec.TLSCertSelfSigned {
-			// Legitimate CAs have required SANs since 2017; absence is suspicious.
-			add(0.5, "TLS certificate has no Subject Alternative Name (SAN)")
+			addTo(&sm.tls, 0.5, "TLS certificate has no Subject Alternative Name (SAN)")
 		}
 	}
 
-	if total > 10.0 {
-		total = 10.0
-	}
+	// ── Baseline anomaly multiplier ──────────────────────────────────────────
+	// Scale the raw score by how anomalous this flow's byte count is relative
+	// to the historical baseline for this (process, port) pair.
+	// The multiplier is 1.0 (neutral) until enough observations have accumulated.
+	raw := sm.total()
+	multiplier := baseline.AnomalyMultiplier(rec.ProcessName, key.DstPort, rec.ByteCount)
+	total := math.Min(10.0, raw*multiplier)
+
 	return total, reasons
 }
 

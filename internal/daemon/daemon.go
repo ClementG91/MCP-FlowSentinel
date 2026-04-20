@@ -7,12 +7,15 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"os"
+	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/ClementG91/MCP-FlowSentinel/internal/aggregate"
 	"github.com/ClementG91/MCP-FlowSentinel/internal/alerting"
+	"github.com/ClementG91/MCP-FlowSentinel/internal/baseline"
 	"github.com/ClementG91/MCP-FlowSentinel/internal/capture"
 	"github.com/ClementG91/MCP-FlowSentinel/internal/config"
 	"github.com/ClementG91/MCP-FlowSentinel/internal/correlate"
@@ -132,6 +135,10 @@ func Run(ctx context.Context) error {
 	if cfg.JA3Feed.Enabled && len(cfg.JA3Feed.URLs) > 0 {
 		go runJA3FeedUpdater(ctx, cfg.JA3Feed)
 	}
+
+	// Initialise behavioural baseline from persisted state.
+	// The cache directory mirrors the XDG_CACHE_HOME convention.
+	baseline.Init(baselineCacheDir())
 
 	// Shared process-metadata cache across all capture windows. Reusing it
 	// means only new PIDs are resolved via gopsutil; existing ones are served
@@ -279,6 +286,16 @@ func runWindow(ctx context.Context, ifaces []string, bpfFilter string, dur time.
 	flowsScored.Add(int64(len(flows)))
 	windowsRun.Add(1)
 
+	// Feed the baseline with per-flow observations so future windows can
+	// detect anomalies relative to historical behaviour.
+	for _, f := range flows {
+		baseline.Observe(f.ProcessName, f.DstPort, f.ByteCount)
+	}
+	// Flush baseline to disk after each window (atomic rename — cheap).
+	if err := baseline.Persist(); err != nil {
+		log.Printf("daemon: baseline persist: %v", err)
+	}
+
 	source := "daemon:" + ifaces[0]
 	if len(ifaces) > 1 {
 		source = fmt.Sprintf("daemon:%d-interfaces", len(ifaces))
@@ -293,6 +310,22 @@ func runWindow(ctx context.Context, ifaces []string, bpfFilter string, dur time.
 
 	return nil
 }
+
+// baselineCacheDir returns the directory used to persist baseline statistics.
+// Follows XDG_CACHE_HOME when set, otherwise ~/.cache/mcp-flowsentinel/.
+func baselineCacheDir() string {
+	if xdg := getenv("XDG_CACHE_HOME"); xdg != "" {
+		return filepath.Join(xdg, "mcp-flowsentinel")
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return filepath.Join(os.TempDir(), "mcp-flowsentinel")
+	}
+	return filepath.Join(home, ".cache", "mcp-flowsentinel")
+}
+
+// getenv is a thin wrapper around os.Getenv used for testability.
+var getenv = os.Getenv
 
 // resolveInterfaces returns the effective interface list from config.
 // Interfaces (new field) takes priority; Interface (legacy) is used when
