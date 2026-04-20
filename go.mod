@@ -1,6 +1,6 @@
 module github.com/ClementG91/MCP-FlowSentinel
 
-go 1.24.0
+go 1.25.9
 
 require (
 	github.com/google/gopacket v1.1.19
