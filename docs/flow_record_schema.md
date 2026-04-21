@@ -55,6 +55,7 @@ Populated when the packet's four-tuple matches a socket in the local OS socket t
 | `geo_high_risk` | boolean | `true` when the country is in the configured high-risk country list |
 | `tls_sni` | string | Server Name Indication from TLS ClientHello |
 | `dns_queries` | string[] | Unique DNS question names observed for this flow |
+| `ip_rep_label` | string | Blocklist label when the destination IP matches an IP reputation feed (e.g. `"feodo: C2 server"`, `"et: known attacker"`). Omitted when the IP is clean. |
 
 ---
 
@@ -150,53 +151,83 @@ Populated from the first HTTP/1.1 request observed in the flow. All fields omitt
 
 | Field | Type | Always present | Description |
 |---|---|---|---|
-| `suspicion_score` | number | yes | Continuous score ≥ 0 with no hard cap. Many signals firing simultaneously can push scores above 10. Thresholds: `< 2.0` = low, `≥ 2.0` = medium, `≥ 5.0` = high, `≥ 7.0` = critical |
+| `suspicion_score` | number | yes | Score in **[0, 10]**. Signals are grouped into six bounded buckets (c2, tls, behavioral, dns, process, network); the sum is scaled by a baseline anomaly multiplier and hard-capped at 10.0. Thresholds: `< 2.0` = low, `≥ 2.0` = medium, `≥ 5.0` = high, `≥ 7.0` = critical |
 | `risk_level` | string | yes | `"low"`, `"medium"`, `"high"`, or `"critical"` |
 | `suspicion_reasons` | string[] | when score > 0 | Human-readable explanation for each signal that contributed to the score |
 | `clean_signals` | string[] | when present | Signals that were evaluated but found benign (reduces false-positive noise) |
 
+### Scoring architecture
+
+Signals are grouped into six independent buckets. Each bucket saturates at its cap; correlated signals within the same bucket cannot stack unboundedly. After summation, a **baseline anomaly multiplier** (0.7×–1.8×, based on Welford running stats per `(process, port)`) scales the total, which is then hard-capped at **10.0**.
+
+| Bucket | Cap | Representative signals |
+|--------|-----|------------------------|
+| `c2` | 6.0 | JA3/JA3S/HASSH fingerprints, known-bad port, IP reputation, C2 User-Agent |
+| `tls` | 3.5 | Self-signed, expired, long-lifetime, IP CN, missing SAN |
+| `behavioral` | 4.0 | Beaconing, port scan, asymmetric upload, large transfer, high rate |
+| `dns` | 3.0 | High-entropy label, NXDOMAIN storm, fast-flux TTL, DoH bypass |
+| `process` | 3.5 | Suspicious path/cmdline, unresolved binary |
+| `network` | 5.0 | High-risk ASN, geo, lateral movement, non-standard ports, CONNECT, IPv6 |
+
 ### Score signal reference
 
-Scores are taken directly from the source — see `internal/aggregate/aggregate.go` for the full list.
+See `internal/aggregate/aggregate.go` for the authoritative list.
 
-| Signal | Score | Notes |
-|---|---|---|
-| Known-bad JA3 (client) | +4.0 | `ja3_known_bad` is set |
-| Known-bad port (4444, 1337, 31337, 6666–6669…) | +4.0 | Metasploit defaults, back-connect shells |
-| Known-bad JA3S (server) | +3.5 | `ja3s_known_bad` is set |
-| Beaconing — strong (inter-packet CV < 0.15, ≥ 5 pkts) | +3.5 | C2 heartbeat pattern |
-| Suspicious HTTP User-Agent | +3.0 | Default C2 profile User-Agent strings |
-| Self-signed TLS certificate | +2.0 | `tls_cert_self_signed` = true |
-| Known-bad HASSH (SSH) | +2.5 | `hassh_known_bad` is set |
-| Suspicious binary path (`/tmp`, AppData\Temp…) | +2.5 | `binary_path` matches known staging locations |
-| High-entropy DNS label (entropy > 3.5 or label > 40 chars) | +2.5 | `dns_queries` contains suspected DGA/exfil domain |
-| Lateral movement (RFC 1918 → RFC 1918) | +1.0–2.5 | Depends on port: SMB/RDP=2.5, WinRM/WMI=2.0, LDAP=1.5, SSH=1.0 |
-| HTTP CONNECT tunnel | +2.0 | `http_method` = CONNECT |
-| Beaconing — possible (CV < 0.30) | +2.0 | Possible C2 heartbeat |
-| Suspicious cmdline pattern | +2.0 | `cmdline` matches known attacker one-liners |
-| NXDOMAIN storm (≥ 5 NXDOMAIN responses) | +2.0 | `nxdomain_count` ≥ 5 |
-| Asymmetric upload (> 10× download) | +2.0 | Cross-flow detection; requires bidirectional flows |
-| Destination in high-risk ASN | +1.5 | `asn_org` matches bulletproof hoster list |
-| Expired TLS certificate | +1.5 | `tls_cert_expired` = true |
-| TLS certificate lifetime > 10 years | +1.5 | `tls_cert_valid_days` > 3650 |
-| Low DNS TTL (< 30 s) | +1.5 | `min_dns_ttl` > 0 and < 30 |
-| QUIC from non-browser process | +1.5 | `is_quic` = true and process is not a known browser |
-| HTTP on non-standard port | +1.5 | HTTP request on port that is not 80/8080 |
-| HTTP/2 on non-standard port | +1.5 | `is_http2` = true and port is not 443/8443 |
-| High-entropy HTTP URI | +1.5 | `http_uri` entropy indicates encoded C2 commands |
-| IPv6 RH0 present | +1.5 | `is_ipv6_rh0` = true |
-| Non-standard port (< 49152, not in standard list) | +1.0 | Low-noise signal, usually overridden by other signals |
-| TLS cert with IP as CN | +1.0 | `tls_cert_ip_cn` = true |
-| Unresolved binary path | +1.0 | Process path could not be read (possible process hiding) |
-| Very high transfer rate (> 20 MB/s, > 2 MB) | +1.0 | Rapid exfiltration indicator |
-| QUIC to high-risk ASN | +1.0 | `is_quic` = true and `geo_high_risk` = true |
-| No reverse DNS on public IP | +0.8 | `reverse_dns` is empty and `dst_ip` is a public IP |
-| Missing TLS SNI on port 443 (> 3 pkts) | +0.7 | Stealthy or non-standard TLS client |
-| Large transfer (> 5 MB) | +0.5 | `byte_count` > 5 MB |
-| Long-lived connection (> 10 min with traffic) | +0.5 | Persistent C2 keepalive indicator |
-| IPv6 fragmentation | +0.5 | `is_ipv6_fragment` = true |
-| DNS-over-HTTPS from non-browser | +0.5 | DoH provider SNI from a non-browser process |
-| Missing TLS SAN | +0.5 | `tls_cert_has_san` = false (and cert present) |
+| Signal | Score | Bucket | Notes |
+|---|---|---|---|
+| Known-bad JA3 (client) | +4.0 | c2 | `ja3_known_bad` is set |
+| Known-bad port (4444, 1337, 31337, 6666–6669…) | +4.0 | c2 | Metasploit defaults, back-connect shells |
+| Known-bad JA3S (server) | +3.5 | c2 | `ja3s_known_bad` is set |
+| IP reputation blocklist hit | +2.5 | c2 | `ip_rep_label` is set (Feodo Tracker, Emerging Threats, custom feed) |
+| Known-bad HASSH (SSH) | +2.5 | c2 | `hassh_known_bad` is set |
+| Suspicious HTTP User-Agent | +3.0 | c2 | Default C2 profile User-Agent strings |
+| Beaconing — strong (inter-packet CV < 0.15, ≥ 5 pkts) | +3.5 | behavioral | C2 heartbeat pattern |
+| Port scan — confirmed (≥ 20 unique destinations) | +3.0 | behavioral | Active network scan |
+| Beaconing — possible (CV < 0.30) | +2.0 | behavioral | Possible C2 heartbeat |
+| Asymmetric upload (> 10× download) | +2.0 | behavioral | Cross-flow detection; requires bidirectional flows |
+| Very high transfer rate (> 20 MB/s, > 2 MB) | +1.0 | behavioral | Rapid exfiltration indicator |
+| Large transfer (> 5 MB) | +0.5 | behavioral | `byte_count` > 5 MB |
+| Long-lived connection (> 10 min with traffic) | +0.5 | behavioral | Persistent C2 keepalive indicator |
+| Port scan — possible (≥ 8 unique destinations) | +1.5 | behavioral | Possible scan activity |
+| Self-signed TLS certificate | +2.0 | tls | `tls_cert_self_signed` = true |
+| Expired TLS certificate | +1.5 | tls | `tls_cert_expired` = true |
+| TLS certificate lifetime > 10 years | +1.5 | tls | `tls_cert_valid_days` > 3650 |
+| TLS cert with IP as CN | +1.0 | tls | `tls_cert_ip_cn` = true |
+| Missing TLS SAN | +0.5 | tls | `tls_cert_has_san` = false (and cert present) |
+| High-entropy DNS label (entropy > 3.5 or label > 40 chars) | +2.5 | dns | `dns_queries` contains suspected DGA/exfil domain |
+| NXDOMAIN storm (≥ 5 NXDOMAIN responses) | +2.0 | dns | `nxdomain_count` ≥ 5 |
+| Low DNS TTL (< 30 s) | +1.5 | dns | `min_dns_ttl` > 0 and < 30 |
+| DNS-over-HTTPS from non-browser | +0.5 | dns | DoH provider SNI from a non-browser process |
+| Suspicious binary path (`/tmp`, AppData\Temp…) | +2.5 | process | `binary_path` matches known staging locations |
+| Suspicious cmdline pattern | +2.0 | process | `cmdline` matches known attacker one-liners |
+| Unresolved binary path | +1.0 | process | Process path could not be read (possible process hiding) |
+| Lateral movement (RFC 1918 → RFC 1918) | +1.0–2.5 | network | Depends on port: SMB/RDP=2.5, WinRM/WMI=2.0, LDAP=1.5, SSH=1.0 |
+| HTTP CONNECT tunnel | +2.0 | network | `http_method` = CONNECT |
+| Destination in high-risk ASN | +1.5 | network | `asn_org` matches bulletproof hoster list |
+| QUIC from non-browser process | +1.5 | network | `is_quic` = true and process is not a known browser |
+| HTTP on non-standard port | +1.5 | network | HTTP request on port that is not 80/8080 |
+| HTTP/2 on non-standard port | +1.5 | network | `is_http2` = true and port is not 443/8443 |
+| High-entropy HTTP URI | +1.5 | network | `http_uri` entropy indicates encoded C2 commands |
+| IPv6 RH0 present | +1.5 | network | `is_ipv6_rh0` = true |
+| Non-standard port (< 49152, not in standard list) | +1.0 | network | Low-noise signal |
+| QUIC to high-risk ASN | +1.0 | network | `is_quic` = true and `geo_high_risk` = true |
+| No reverse DNS on public IP | +0.8 | network | `reverse_dns` is empty and `dst_ip` is a public IP |
+| Missing TLS SNI on port 443 (> 3 pkts) | +0.7 | network | Stealthy or non-standard TLS client |
+| IPv6 fragmentation | +0.5 | network | `is_ipv6_fragment` = true |
+
+### Baseline anomaly multiplier
+
+In daemon mode, each `(process_name, dst_port)` pair accumulates byte-count statistics using Welford's online algorithm. The multiplier applied to the raw categorical score is:
+
+| Deviation from historical mean | Multiplier |
+|-------------------------------|------------|
+| < 5 observations (cold start) | 1.0× |
+| < 1σ | 0.7× (typical traffic, score dampened) |
+| 1–2σ | 1.0× |
+| 2–3σ | 1.3× |
+| ≥ 3σ | 1.8× |
+
+The multiplier is applied per-flow; the result is hard-capped at 10.0.
 
 ---
 
@@ -244,13 +275,15 @@ Scores are taken directly from the source — see `internal/aggregate/aggregate.
   "tls_cert_self_signed": true,
   "tls_cert_valid_days": 7,
   "tls_cert_has_san": false,
-  "suspicion_score": 15.5,
+  "suspicion_score": 10.0,
   "risk_level": "critical",
   "suspicion_reasons": [
     "JA3 client fingerprint matches known malware: Cobalt Strike (default profile) [51c64c77e60f3980eea90869b68c58a8]",
     "JA3S server fingerprint matches known C2 infrastructure: Cobalt Strike (default SSL server) [ae4edc6faf64d08308082ad26be60767]",
     "TLS certificate is self-signed",
-    "TLS certificate expires in 7 days"
+    "TLS certificate expires in 7 days",
+    "suspicious binary path: /tmp/implant.py",
+    "suspicious cmdline pattern matched: implant.py"
   ],
   "mitre_techniques": [
     {"id": "T1071.001", "name": "Application Layer Protocol: Web Protocols"},

@@ -246,47 +246,88 @@ Open VS Code settings (`Ctrl+,`), search for **Cline MCP**, click *Edit in setti
 
 ## Detection engine
 
-Each flow is scored based on 30+ independent signals. Scores start at 0 and have no hard cap (a flow matching many signals can exceed 10). Cross-flow bonus steps (scan detection, asymmetric upload) are capped at 10. Every fired signal is recorded in `suspicion_reasons`; matched [MITRE ATT&CK](https://attack.mitre.org/) techniques are included in `mitre_techniques`.
+Each flow is scored using **categorical bounded scoring** across six signal buckets. Every bucket has an independent cap, preventing correlated signals from stacking unboundedly. The final score is always in **[0, 10]**. Every fired signal is recorded in `suspicion_reasons`; matched [MITRE ATT&CK](https://attack.mitre.org/) techniques are included in `mitre_techniques`.
+
+### Scoring architecture
+
+| Bucket | Cap | Contains |
+|--------|-----|----------|
+| `c2` | 6.0 | Known-bad JA3/JA3S/HASSH fingerprints, known-bad ports, IP reputation, C2 User-Agent |
+| `tls` | 3.5 | TLS certificate anomalies (self-signed, expired, long lifetime, IP CN, missing SAN) |
+| `behavioral` | 4.0 | Beaconing, port scan, asymmetric upload, long-lived connections, high transfer rates |
+| `dns` | 3.0 | High-entropy labels, NXDOMAIN storm, fast-flux TTL, DoH from non-browser |
+| `process` | 3.5 | Suspicious binary path/cmdline, unresolved path |
+| `network` | 5.0 | High-risk ASN, geo, lateral movement, non-standard ports, HTTP CONNECT, IPv6 anomalies |
+
+After bucket totals are summed, a **baseline anomaly multiplier** scales the raw score (0.7× for typical traffic, 1.0× for normal, 1.3× at 2σ deviation, 1.8× at ≥3σ). The final score is hard-capped at **10.0**.
+
+### Baseline learning
+
+In daemon mode, MCP-FlowSentinel continuously learns the normal behaviour of each `(process, destination port)` pair using [Welford's online algorithm](https://en.wikipedia.org/wiki/Algorithms_for_calculating_variance#Welford's_online_algorithm). After 5+ observations, flows that deviate significantly from the process's historical byte volume are scored higher:
+
+| Deviation from baseline | Multiplier |
+|------------------------|------------|
+| < 5 observations (cold start) | 1.0× (neutral) |
+| < 1σ above mean | 0.7× (typical — score is dampened) |
+| 1–2σ | 1.0× (normal range) |
+| 2–3σ | 1.3× (elevated) |
+| ≥ 3σ | 1.8× (anomalous) |
+
+Baseline state persists across restarts at `~/.cache/mcp-flowsentinel/baseline.json` (XDG_CACHE_HOME respected). Entries older than 72 hours are pruned automatically.
+
+### Process context masking
+
+MCP-FlowSentinel classifies the process making a connection and suppresses signals that are expected for that class, reducing false positives:
+
+| Context | Examples | Suppressed signals |
+|---------|----------|-------------------|
+| Browser | chrome, firefox, msedge, safari | DoH (+0.5), QUIC (+1.5), DoH from non-browser |
+| System service | svchost, systemd, chronyd, launchd | Beaconing scoring (heartbeat is expected) |
+| Dev tool | node, python3, docker, go | NXDOMAIN threshold doubled (frequent in development) |
 
 ### Scoring signals
 
-| Signal | Max pts | Notes |
-|--------|---------|-------|
-| Known-bad port (4444, 1337, 31337, 6666–6669 …) | +4.0 | Metasploit defaults, back-connect shells, botnets |
-| **JA3 TLS client fingerprint — known malware** | **+4.0** | Cobalt Strike, Meterpreter, Empire, Sliver, Dridex, TrickBot, Emotet, Havoc, BruteRatel, AsyncRAT … |
-| **JA3S TLS server fingerprint — known C2** | **+3.5** | Identifies C2 infrastructure even when implant randomises its ClientHello |
-| Beaconing — strong (inter-packet CV < 0.15, ≥ 5 pkts) | +3.5 | C2 heartbeat pattern |
-| Beaconing — possible (CV < 0.30) | +2.0 | Possible C2 heartbeat |
-| Port scan — confirmed (≥ 20 unique destinations) | +3.0 | Active network scan |
-| Known-bad HTTP User-Agent (Cobalt Strike, Meterpreter, Empire …) | +3.0 | Default C2 profile fingerprints |
-| HTTP CONNECT tunnel | +2.0 | Proxy-based C2 channel |
-| **TLS self-signed certificate** | **+2.0** | Common on attacker-controlled C2 infrastructure |
-| Asymmetric upload (upload > 10× download) | +2.0 | Data exfiltration indicator |
-| Suspicious binary path (`/tmp`, `AppData\Local\Temp` …) | +2.5 | Classic implant staging location |
-| Suspicious cmdline pattern (`base64 -d`, `curl\|sh`, `python -c` …) | +2.0 | One-liner attacker techniques |
-| **HASSH SSH client fingerprint — offensive library** | **+2.5** | Paramiko, AsyncSSH, libssh2 — common in credential-stuffing and lateral movement |
-| NXDOMAIN storm (≥ 5 NXDOMAIN per flow) | +2.0 | DGA / C2-over-DNS |
-| High-entropy DNS label (entropy > 3.5 or label > 40 chars) | +2.5 | DNS exfiltration / C2 tunneling |
-| Port scan — possible (≥ 8 unique destinations) | +1.5 | Possible scan activity |
-| IPv6 Routing Header type 0 (deprecated, RFC 5095) | +1.5 | Source-routing evasion technique |
-| Low DNS TTL (< 30 s) | +1.5 | Fast-flux / DGA domain |
-| TLS expired certificate | +1.5 | Misconfigured or attacker-controlled |
-| TLS certificate lifetime > 10 years | +1.5 | Self-generated attacker certificate |
-| HTTP/2 on non-standard port | +1.5 | C2 over non-standard channel |
-| HTTP on non-standard port | +1.5 | Potential covert channel |
-| High-entropy HTTP URI | +1.5 | Encoded/obfuscated C2 commands |
-| Destination in high-risk ASN (bulletproof hosters) | +1.5 | Frantech, Serverius, QuadraNet … |
-| Destination in high-risk ASN + QUIC | +1.0 | Encrypted UDP C2 channel |
-| TLS certificate CN is an IP address | +1.0 | Attacker-generated certificate |
-| Unresolved binary path | +1.0 | Process hiding or rapid exit |
-| No reverse DNS on public IP | +0.8 | Direct IP connections |
-| Missing TLS SNI on port 443 (> 3 pkts) | +0.7 | Stealthy TLS client |
-| DNS-over-HTTPS from non-browser process | +0.5 | Resolver bypass / DNS tunneling |
-| Long-lived connection (> 10 min with traffic) | +0.5 | Persistent C2 keepalive |
-| IPv6 fragmentation | +0.5 | Potential JA3 evasion via fragmentation |
-| Large transfer (> 5 MB) | +0.5 | Bulk exfiltration indicator |
-| Very high transfer rate (> 20 MB/s, > 2 MB total) | +1.0 | Rapid exfiltration indicator |
-| Lateral movement to RFC1918 (SMB/RDP/WMI/LDAP/SSH) | +1.0–2.5 | Score depends on port: SMB/RDP=2.5, WinRM/WMI=2.0, LDAP=1.5, SSH=1.0 |
+| Signal | Pts | Bucket | Notes |
+|--------|-----|--------|-------|
+| Known-bad port (4444, 1337, 31337, 6666–6669 …) | +4.0 | c2 | Metasploit defaults, back-connect shells, botnets |
+| **JA3 TLS client fingerprint — known malware** | **+4.0** | c2 | Cobalt Strike, Meterpreter, Empire, Sliver, Dridex, TrickBot, Emotet … |
+| **JA3S TLS server fingerprint — known C2** | **+3.5** | c2 | Identifies C2 infrastructure even when implant randomises its ClientHello |
+| **IP reputation blocklist hit** | **+2.5** | c2 | Destination IP matched Feodo Tracker, Emerging Threats, or custom feed |
+| **HASSH SSH client fingerprint — offensive library** | **+2.5** | c2 | Paramiko, AsyncSSH, libssh2 — common in credential-stuffing and lateral movement |
+| Known-bad HTTP User-Agent (Cobalt Strike, Meterpreter …) | +3.0 | c2 | Default C2 profile fingerprints |
+| Beaconing — strong (inter-packet CV < 0.15, ≥ 5 pkts) | +3.5 | behavioral | C2 heartbeat pattern |
+| Port scan — confirmed (≥ 20 unique destinations) | +3.0 | behavioral | Active network scan |
+| Beaconing — possible (CV < 0.30) | +2.0 | behavioral | Possible C2 heartbeat |
+| Asymmetric upload (upload > 10× download) | +2.0 | behavioral | Data exfiltration indicator |
+| Very high transfer rate (> 20 MB/s, > 2 MB total) | +1.0 | behavioral | Rapid exfiltration indicator |
+| Long-lived connection (> 10 min with traffic) | +0.5 | behavioral | Persistent C2 keepalive |
+| Large transfer (> 5 MB) | +0.5 | behavioral | Bulk exfiltration indicator |
+| Port scan — possible (≥ 8 unique destinations) | +1.5 | behavioral | Possible scan activity |
+| **TLS self-signed certificate** | **+2.0** | tls | Common on attacker-controlled C2 infrastructure |
+| TLS expired certificate | +1.5 | tls | Misconfigured or attacker-controlled |
+| TLS certificate lifetime > 10 years | +1.5 | tls | Self-generated attacker certificate |
+| TLS certificate CN is an IP address | +1.0 | tls | Attacker-generated certificate |
+| Missing TLS SAN | +0.5 | tls | Pre-2017 or self-generated certificate |
+| High-entropy DNS label (entropy > 3.5 or label > 40 chars) | +2.5 | dns | DNS exfiltration / C2 tunneling |
+| NXDOMAIN storm (≥ 5 NXDOMAIN per flow) | +2.0 | dns | DGA / C2-over-DNS |
+| Low DNS TTL (< 30 s) | +1.5 | dns | Fast-flux / DGA domain |
+| DNS-over-HTTPS from non-browser process | +0.5 | dns | Resolver bypass / DNS tunneling |
+| Suspicious binary path (`/tmp`, `AppData\Local\Temp` …) | +2.5 | process | Classic implant staging location |
+| Suspicious cmdline pattern (`base64 -d`, `curl\|sh`, `python -c` …) | +2.0 | process | One-liner attacker techniques |
+| Unresolved binary path | +1.0 | process | Process hiding or rapid exit |
+| Lateral movement to RFC1918 (SMB/RDP/WMI/LDAP/SSH) | +1.0–2.5 | network | Score depends on port: SMB/RDP=2.5, WinRM/WMI=2.0, LDAP=1.5, SSH=1.0 |
+| HTTP CONNECT tunnel | +2.0 | network | Proxy-based C2 channel |
+| Destination in high-risk ASN (bulletproof hosters) | +1.5 | network | Frantech, Serverius, QuadraNet … |
+| QUIC from non-browser process | +1.5 | network | Encrypted UDP C2 channel |
+| HTTP/2 on non-standard port | +1.5 | network | C2 over non-standard channel |
+| HTTP on non-standard port | +1.5 | network | Potential covert channel |
+| High-entropy HTTP URI | +1.5 | network | Encoded/obfuscated C2 commands |
+| IPv6 Routing Header type 0 (deprecated, RFC 5095) | +1.5 | network | Source-routing evasion technique |
+| Destination in high-risk ASN + QUIC | +1.0 | network | Encrypted UDP C2 channel |
+| No reverse DNS on public IP | +0.8 | network | Direct IP connections |
+| Missing TLS SNI on port 443 (> 3 pkts) | +0.7 | network | Stealthy TLS client |
+| Non-standard port (< 49152, not in standard list) | +1.0 | network | Low-noise signal |
+| IPv6 fragmentation | +0.5 | network | Potential JA3 evasion via fragmentation |
 
 All signals can be individually disabled via `disable_*_scoring` config flags. Low-scoring flows include a `clean_signals` array explaining why they look benign (standard port, resolved hostname, country, TLS SNI).
 
@@ -473,6 +514,9 @@ scoring:
   # Process exemptions — skip beaconing + binary-path scoring for these:
   exempted_processes: ["prometheus", "datadog-agent"]
 
+  # Dev-tool processes — NXDOMAIN threshold is doubled for these:
+  dev_tool_processes: ["node", "python3", "docker", "go", "cargo"]
+
   # Kill-switches for noisy signals:
   disable_binary_path_scoring: false
   disable_port_scoring: false
@@ -525,6 +569,22 @@ ja3_feed:
   update_interval_hours: 24
   urls:
     - https://example.com/ja3_feed.csv   # CSV: hash,description
+
+# ─── HASSH Feed (optional, extends built-in hash list) ────────────────────
+hassh_feed:
+  enabled: false
+  update_interval_hours: 24
+  urls: []                              # CSV: hash,description
+  local_file: ""                        # path to a local CSV file
+
+# ─── IP Reputation (optional, Feodo Tracker + Emerging Threats by default) ─
+ip_rep:
+  enabled: false                        # set to true to activate blocklist lookups
+  update_interval_hours: 24
+  urls:
+    - https://feodotracker.abuse.ch/downloads/ipblocklist.txt
+    - https://rules.emergingthreats.net/fwrules/emerging-Block-IPs.txt
+  local_file: ""                        # path to a local IP/CIDR list
 
 # ─── Prometheus metrics (optional) ───────────────────────────────────────
 metrics:
@@ -652,17 +712,20 @@ internal/
               tls.go                TLS SNI extraction (hand-rolled ClientHello parser)
               tls_cert.go           TLS ServerCertificate parsing (crypto/x509)
               ssh.go                SSH HASSH fingerprinting (RFC 4253 KEXINIT parser)
+              hassh_feed.go         Dynamic HASSH feed: static built-ins + URL/file feed + disk cache
   correlate/  correlate.go          Maps socket 4-tuples → processes (gopsutil)
-  aggregate/  aggregate.go          Flow aggregation, 25+ scoring signals, beaconing, JA3/JA3S/HASSH
+  aggregate/  aggregate.go          Flow aggregation, categorical bounded scoring, process context, baseline multiplier
               filter.go             min_score / top_n filtering
+  baseline/   baseline.go           Welford online stats per (process, port); anomaly multiplier; JSON persistence
   intel/      intel.go              GeoIP + high-risk ASN enrichment (MaxMind GeoLite2)
+              iprep.go              IP reputation: exact-IP map + CIDR range scan; Feodo Tracker + ET feeds
               mitre.go              MITRE ATT&CK technique mapping
   ja3/        ja3.go                JA3 TLS client fingerprinting + known-bad hash lookup
               ja3s.go               JA3S TLS server fingerprinting + known-bad C2 server lookup
   history/    history.go            Rolling JSONL persistence + gzip daily rotation
   alerting/   alerting.go           Webhook notifications with deduplication + HMAC signing
               store.go              Persistent alert log (JSONL) + GetAlerts query
-  daemon/     daemon.go             Continuous background capture loop
+  daemon/     daemon.go             Continuous background capture loop; baseline init; feed updater goroutines
   updater/    updater.go            Self-update from GitHub Releases
   cache/      lru.go                Generic bounded LRU cache (DNS PTR, GeoIP)
   tools/      register.go           MCP tool registration
@@ -699,9 +762,12 @@ Packet stream (libpcap)
   → correlate.SocketTable.Lookup         (map flow → process)
   → aggregate.Finalize
       ↳ Pass 1: build base FlowRecords
-      ↳ Pass 2: parallel reverse-DNS      (configurable workers, LRU cache)
-      ↳ Pass 2.5: GeoIP + JA3/JA3S/HASSH enrichment
-      ↳ Pass 3: per-flow scoring (25+ signals) + MITRE mapping + clean signals
+      ↳ Pass 2: parallel reverse-DNS           (configurable workers, LRU cache)
+      ↳ Pass 2.5: GeoIP + JA3/JA3S/HASSH + IP reputation enrichment
+      ↳ Pass 3: categorical bounded scoring (6 buckets, hard cap 10.0)
+                + baseline anomaly multiplier (Welford online stats)
+                + process context masking (browser/system/devtool)
+                + MITRE mapping + clean signals
       ↳ Pass 4: cross-flow scan detection
   → history.Append                       (persist to rolling JSONL)
   → alerting.Fire                        (webhook POST for CRITICAL flows)
