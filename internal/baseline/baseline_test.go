@@ -12,9 +12,14 @@ import (
 func resetGlobal() {
 	global.mu.Lock()
 	global.entries = make(map[string]*entry)
+	global.dests = make(map[string]*destEntry)
+	global.beaconing = make(map[string]*beaconEntry)
 	global.cacheDir = ""
 	global.mu.Unlock()
 }
+
+// resetBaseline is an alias for resetGlobal used by the new feature tests.
+func resetBaseline() { resetGlobal() }
 
 // ─── entry / Welford ─────────────────────────────────────────────────────────
 
@@ -251,5 +256,80 @@ func TestPortStr(t *testing.T) {
 		if got != c.want {
 			t.Errorf("portStr(%d)=%q want %q", c.in, got, c.want)
 		}
+	}
+}
+
+// ─── ObserveDest / IsNewDestination ──────────────────────────────────────────
+
+func TestIsNewDestination_ColdStart(t *testing.T) {
+	resetBaseline()
+	// No observations yet → confident=false
+	isNew, confident := IsNewDestination("chrome", "1.2.3.4")
+	if confident {
+		t.Fatal("should not be confident with zero observations")
+	}
+	if isNew {
+		t.Fatal("isNew should be false when not confident")
+	}
+}
+
+func TestIsNewDestination_KnownDest(t *testing.T) {
+	resetBaseline()
+	// Build enough observations with a known destination.
+	for i := 0; i < MinDestObs()+1; i++ {
+		ObserveDest("python3", "1.2.3.4")
+	}
+	isNew, confident := IsNewDestination("python3", "1.2.3.4")
+	if !confident {
+		t.Fatal("should be confident after enough observations")
+	}
+	if isNew {
+		t.Fatal("known destination should not be flagged as new")
+	}
+}
+
+func TestIsNewDestination_NewDest(t *testing.T) {
+	resetBaseline()
+	for i := 0; i < MinDestObs()+1; i++ {
+		ObserveDest("python3", "1.2.3.4")
+	}
+	isNew, confident := IsNewDestination("python3", "9.9.9.9")
+	if !confident {
+		t.Fatal("should be confident")
+	}
+	if !isNew {
+		t.Fatal("unseen destination should be flagged as new")
+	}
+}
+
+// ─── ObserveBeaconing / IsExpectedBeaconer ───────────────────────────────────
+
+func TestIsExpectedBeaconer_BelowThreshold(t *testing.T) {
+	resetBaseline()
+	for i := 0; i < MinBeaconingObs()-1; i++ {
+		ObserveBeaconing("svchost")
+	}
+	if IsExpectedBeaconer("svchost") {
+		t.Fatal("should not be expected beaconer below threshold")
+	}
+}
+
+func TestIsExpectedBeaconer_AtThreshold(t *testing.T) {
+	resetBaseline()
+	for i := 0; i < MinBeaconingObs(); i++ {
+		ObserveBeaconing("prometheus")
+	}
+	if !IsExpectedBeaconer("prometheus") {
+		t.Fatal("should be expected beaconer at threshold")
+	}
+}
+
+func TestIsExpectedBeaconer_CaseInsensitive(t *testing.T) {
+	resetBaseline()
+	for i := 0; i < MinBeaconingObs(); i++ {
+		ObserveBeaconing("CHROME")
+	}
+	if !IsExpectedBeaconer("chrome") {
+		t.Fatal("expected beaconer check should be case-insensitive")
 	}
 }

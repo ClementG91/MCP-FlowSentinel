@@ -29,6 +29,7 @@ type Config struct {
 	JA3Feed   JA3FeedConfig   `yaml:"ja3_feed"`
 	HasshFeed HasshFeedConfig `yaml:"hassh_feed"`
 	IPRep     IPRepConfig     `yaml:"ip_rep"`
+	DomRep    DomRepConfig    `yaml:"dom_rep"`
 	Metrics   MetricsConfig   `yaml:"metrics"`
 	Intel     IntelConfig     `yaml:"intel"`
 }
@@ -222,6 +223,18 @@ type IPRepConfig struct {
 	LocalFile string `yaml:"local_file"`
 }
 
+// DomRepConfig controls the domain reputation feed.
+type DomRepConfig struct {
+	// Enabled controls whether domain reputation lookups are active. Default: false.
+	Enabled bool `yaml:"enabled"`
+	// UpdateIntervalHours is how often remote feeds are refreshed. Default: 24.
+	UpdateIntervalHours int `yaml:"update_interval_hours"`
+	// URLs lists remote feeds. URLhaus text format and ThreatFox CSV are supported.
+	URLs []string `yaml:"urls"`
+	// LocalFile is an optional local file (one URL or domain per line).
+	LocalFile string `yaml:"local_file"`
+}
+
 // IntelConfig holds external threat-intelligence API keys and settings.
 type IntelConfig struct {
 	// VirusTotalAPIKey enables VirusTotal file reputation lookups in scan_process.
@@ -294,6 +307,14 @@ func Default() *Config {
 			URLs: []string{
 				"https://feodotracker.abuse.ch/downloads/ipblocklist.txt",
 				"https://rules.emergingthreats.net/fwrules/emerging-Block-IPs.txt",
+			},
+		},
+		DomRep: DomRepConfig{
+			Enabled:             false,
+			UpdateIntervalHours: 24,
+			URLs: []string{
+				"https://urlhaus.abuse.ch/downloads/text/",
+				"https://threatfox.abuse.ch/export/csv/domains/recent/",
 			},
 		},
 		Metrics: MetricsConfig{
@@ -586,6 +607,20 @@ func mergeOverDefaults(dst, override *Config) {
 	}
 	if oir.LocalFile != "" {
 		ir.LocalFile = oir.LocalFile
+	}
+
+	// DomRep
+	if override.DomRep.Enabled {
+		dst.DomRep.Enabled = true
+	}
+	if override.DomRep.UpdateIntervalHours != 0 {
+		dst.DomRep.UpdateIntervalHours = override.DomRep.UpdateIntervalHours
+	}
+	if override.DomRep.LocalFile != "" {
+		dst.DomRep.LocalFile = override.DomRep.LocalFile
+	}
+	if len(override.DomRep.URLs) > 0 {
+		dst.DomRep.URLs = override.DomRep.URLs
 	}
 
 	m := &dst.Metrics

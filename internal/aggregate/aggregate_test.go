@@ -84,7 +84,7 @@ func withRDNS(h string) func(*FlowRecord)         { return func(r *FlowRecord) {
 func TestScore_KnownBadPort(t *testing.T) {
 	key := FlowKey{SrcIP: "10.0.0.1", DstIP: "8.8.8.8", DstPort: 4444, Proto: "TCP"}
 	rec := makeRec(withRDNS("some.host")) // suppress DNS penalty
-	s, reasons := score(key, rec, nil)
+	s, reasons := score(key, rec, nil, 0)
 	if s < 4.0 {
 		t.Errorf("expected score ≥ 4.0 for port 4444, got %.2f", s)
 	}
@@ -103,7 +103,7 @@ func TestScore_StandardPort(t *testing.T) {
 	// Port 443 should not add a port penalty.
 	key := FlowKey{SrcIP: "10.0.0.1", DstIP: "1.1.1.1", DstPort: 443, Proto: "TCP"}
 	rec := makeRec(withRDNS("cloudflare.com"))
-	s, reasons := score(key, rec, nil)
+	s, reasons := score(key, rec, nil, 0)
 	for _, r := range reasons {
 		if strings.Contains(r, "non-standard port") || strings.Contains(r, "high-risk port") {
 			t.Errorf("unexpected port reason %q for port 443 (score=%.2f)", r, s)
@@ -115,7 +115,7 @@ func TestScore_EphemeralPort(t *testing.T) {
 	// Ephemeral port (≥49152) on a return flow must NOT be scored.
 	key := FlowKey{SrcIP: "10.0.0.1", DstIP: "192.168.1.5", DstPort: 55000, Proto: "TCP"}
 	rec := makeRec(withRDNS("internal.host"))
-	_, reasons := score(key, rec, nil)
+	_, reasons := score(key, rec, nil, 0)
 	for _, r := range reasons {
 		if strings.Contains(r, "non-standard port") {
 			t.Errorf("ephemeral port 55000 should not trigger port reason, got %q", r)
@@ -126,7 +126,7 @@ func TestScore_EphemeralPort(t *testing.T) {
 func TestScore_SuspiciousPath(t *testing.T) {
 	key := FlowKey{SrcIP: "10.0.0.2", DstIP: "1.2.3.4", DstPort: 80, Proto: "TCP"}
 	rec := makeRec(withPID(1234), withBinaryPath("/tmp/backdoor"), withRDNS("host.example"))
-	s, reasons := score(key, rec, nil)
+	s, reasons := score(key, rec, nil, 0)
 	found := false
 	for _, r := range reasons {
 		if strings.Contains(r, "suspicious path") {
@@ -144,7 +144,7 @@ func TestScore_SuspiciousPath(t *testing.T) {
 func TestScore_SuspiciousCmdline(t *testing.T) {
 	key := FlowKey{SrcIP: "10.0.0.3", DstIP: "5.6.7.8", DstPort: 443, Proto: "TCP"}
 	rec := makeRec(withRDNS("cdn.host"), withCmdline("python3 -c 'import socket; ...'"))
-	s, reasons := score(key, rec, nil)
+	s, reasons := score(key, rec, nil, 0)
 	found := false
 	for _, r := range reasons {
 		if strings.Contains(r, "cmdline") {
@@ -163,7 +163,7 @@ func TestScore_CmdlineRegexWhitespaceVariant(t *testing.T) {
 	// Regex must catch "base64  -d" (extra space) — missed by old exact-string matching.
 	key := FlowKey{SrcIP: "10.0.0.3", DstIP: "5.6.7.8", DstPort: 443, Proto: "TCP"}
 	rec := makeRec(withRDNS("cdn.host"), withCmdline("base64  -d < /tmp/payload | bash"))
-	_, reasons := score(key, rec, nil)
+	_, reasons := score(key, rec, nil, 0)
 	found := false
 	for _, r := range reasons {
 		if strings.Contains(r, "cmdline") {
@@ -182,7 +182,7 @@ func TestScore_PrivateIPNoDNSPenalty(t *testing.T) {
 	for _, dstIP := range []string{"10.0.0.1", "192.168.1.1", "172.16.0.1", "127.0.0.1"} {
 		key := FlowKey{SrcIP: "10.0.0.2", DstIP: dstIP, DstPort: 8080, Proto: "TCP"}
 		rec := makeRec(withDstIP(dstIP)) // DstIP must match key so isPrivateIP is evaluated correctly
-		_, reasons := score(key, rec, nil)
+		_, reasons := score(key, rec, nil, 0)
 		for _, r := range reasons {
 			if strings.Contains(r, "reverse DNS") {
 				t.Errorf("private IP %s should not receive DNS penalty, got reason: %q", dstIP, r)
@@ -194,7 +194,7 @@ func TestScore_PrivateIPNoDNSPenalty(t *testing.T) {
 func TestScore_PublicIPGetsDNSPenalty(t *testing.T) {
 	key := FlowKey{SrcIP: "10.0.0.1", DstIP: "203.0.113.1", DstPort: 80, Proto: "TCP"}
 	rec := makeRec(withDstIP("203.0.113.1"), withRDNS(""))
-	_, reasons := score(key, rec, nil)
+	_, reasons := score(key, rec, nil, 0)
 	found := false
 	for _, r := range reasons {
 		if strings.Contains(r, "reverse DNS") {
@@ -330,7 +330,7 @@ func TestAggregatorAddAndFinalize_BasicFlow(t *testing.T) {
 		})
 	}
 
-	records := agg.Finalize(nil)
+	records := agg.Finalize(nil, nil)
 	if len(records) != 1 {
 		t.Fatalf("expected 1 flow record, got %d", len(records))
 	}
@@ -368,7 +368,7 @@ func TestAggregatorAdd_AccumulatesDNSQueries(t *testing.T) {
 		})
 	}
 
-	records := agg.Finalize(nil)
+	records := agg.Finalize(nil, nil)
 	if len(records) != 1 {
 		t.Fatalf("expected 1 flow, got %d", len(records))
 	}
@@ -394,7 +394,7 @@ func TestAggregatorAdd_AccumulatesTLSSNI(t *testing.T) {
 		})
 	}
 
-	records := agg.Finalize(nil)
+	records := agg.Finalize(nil, nil)
 	if len(records) != 1 {
 		t.Fatalf("expected 1 flow, got %d", len(records))
 	}
@@ -432,7 +432,7 @@ func TestAggregatorFinalize_MultipleFlows_SortedByScore(t *testing.T) {
 		})
 	}
 
-	records := agg.Finalize(nil)
+	records := agg.Finalize(nil, nil)
 	if len(records) != 2 {
 		t.Fatalf("expected 2 flows, got %d", len(records))
 	}
@@ -461,7 +461,7 @@ func TestIsPrivateIP_InvalidIP_ReturnsTrueNoPanic(t *testing.T) {
 func TestScore_PIDWithoutBinaryPath_AddsReason(t *testing.T) {
 	key := FlowKey{SrcIP: "10.0.0.1", DstIP: "8.8.8.8", DstPort: 443, Proto: "TCP"}
 	rec := makeRec(withRDNS("google.com"), withPID(1234)) // PID > 0, BinaryPath empty
-	s, reasons := score(key, rec, nil)
+	s, reasons := score(key, rec, nil, 0)
 	_ = s
 	found := false
 	for _, r := range reasons {
@@ -484,7 +484,7 @@ func TestScore_GeoHighRisk_AddsReason(t *testing.T) {
 			r.DstIP = "1.2.3.4"
 		},
 	)
-	s, reasons := score(key, rec, nil)
+	s, reasons := score(key, rec, nil, 0)
 	if s <= 0 {
 		t.Errorf("expected positive score for GeoHighRisk flow, got %.2f", s)
 	}
@@ -583,7 +583,7 @@ func TestFinalize_WithResolver_SetsProcessInfo(t *testing.T) {
 		return nil
 	})
 
-	records := agg.Finalize(resolver)
+	records := agg.Finalize(resolver, nil)
 	if len(records) != 1 {
 		t.Fatalf("expected 1 record, got %d", len(records))
 	}
@@ -617,7 +617,7 @@ func TestFinalize_ScanDetection_ManyDestinations(t *testing.T) {
 		})
 	}
 
-	records := agg.Finalize(nil)
+	records := agg.Finalize(nil, nil)
 	if len(records) != 20 {
 		t.Fatalf("expected 20 flow records, got %d", len(records))
 	}
@@ -655,7 +655,7 @@ func TestFinalize_ScanDetection_PossibleScan(t *testing.T) {
 		})
 	}
 
-	records := agg.Finalize(nil)
+	records := agg.Finalize(nil, nil)
 	found := false
 	for _, r := range records {
 		for _, reason := range r.SuspicionReasons {
@@ -680,7 +680,7 @@ func TestScore_HighByteCount_AddsReason(t *testing.T) {
 	rec := makeRec(withRDNS("google.com"), func(r *FlowRecord) {
 		r.ByteCount = 6 * 1024 * 1024 // 6 MB — above 5 MB threshold
 	})
-	_, reasons := score(key, rec, nil)
+	_, reasons := score(key, rec, nil, 0)
 	found := false
 	for _, r := range reasons {
 		if strings.Contains(r, "high data transfer") {
@@ -709,7 +709,7 @@ func TestScore_CapAt10_IsEnforced(t *testing.T) {
 			r.DstIP = "203.0.113.1"
 		},
 	)
-	s, _ := score(key, rec, nil)
+	s, _ := score(key, rec, nil, 0)
 	if s > 10.0 {
 		t.Errorf("score must never exceed 10.0, got %.2f", s)
 	}
@@ -743,7 +743,7 @@ func TestScore_HardCapAt10_MultiCategory(t *testing.T) {
 			r.TLSCertExpired = true
 		},
 	)
-	s, _ := score(key, rec, nil)
+	s, _ := score(key, rec, nil, 0)
 	if s != 10.0 {
 		t.Errorf("fully-saturated score should be exactly 10.0, got %.2f", s)
 	}
@@ -755,7 +755,7 @@ func TestScore_DNSExfiltration_AddsReason(t *testing.T) {
 		// Label with high entropy — 20 random chars > 3.5 bits/char entropy
 		r.DNSQueries = []string{"xKp2mVwBrNkJsDgTyFhc.evil.com"}
 	})
-	_, reasons := score(key, rec, nil)
+	_, reasons := score(key, rec, nil, 0)
 	found := false
 	for _, r := range reasons {
 		if strings.Contains(r, "DNS exfiltration") {
@@ -772,7 +772,7 @@ func TestScore_BenignCmdline_NoReason(t *testing.T) {
 	// Covers the "loop iterates but never matches" path.
 	key := FlowKey{SrcIP: "10.0.0.1", DstIP: "8.8.8.8", DstPort: 443, Proto: "TCP"}
 	rec := makeRec(withRDNS("google.com"), withCmdline("java -jar myapp.jar"))
-	_, reasons := score(key, rec, nil)
+	_, reasons := score(key, rec, nil, 0)
 	for _, r := range reasons {
 		if strings.Contains(r, "cmdline") {
 			t.Errorf("benign cmdline should not produce cmdline reason, got: %q", r)
@@ -828,7 +828,7 @@ func TestFinalize_ScanDetection_FewDestinations_NoBonuses(t *testing.T) {
 		})
 	}
 
-	records := agg.Finalize(nil)
+	records := agg.Finalize(nil, nil)
 	for _, r := range records {
 		for _, reason := range r.SuspicionReasons {
 			if strings.Contains(reason, "scan") {
@@ -843,7 +843,7 @@ func TestScore_NonStandardPort_LessThan49152_AddsReason(t *testing.T) {
 	// This exercises the "else if key.DstPort < 49152 && !standardPorts[...]" branch.
 	key := FlowKey{SrcIP: "10.0.0.1", DstIP: "1.2.3.4", DstPort: 1234, Proto: "TCP"}
 	rec := makeRec(withRDNS("somehost.example"))
-	s, reasons := score(key, rec, nil)
+	s, reasons := score(key, rec, nil, 0)
 	found := false
 	for _, r := range reasons {
 		if strings.Contains(r, "non-standard port 1234") {
@@ -911,7 +911,7 @@ func TestScore_QUIC_NonBrowserProcess_AddsReason(t *testing.T) {
 		r.ProcessName = "implant"
 		r.DstIP = "1.2.3.4"
 	})
-	_, reasons := score(key, rec, nil)
+	_, reasons := score(key, rec, nil, 0)
 	found := false
 	for _, r := range reasons {
 		if strings.Contains(r, "non-browser process") {
@@ -930,7 +930,7 @@ func TestScore_QUIC_BrowserProcess_NoReason(t *testing.T) {
 		r.ProcessName = "chrome"
 		r.DstIP = "1.2.3.4"
 	})
-	_, reasons := score(key, rec, nil)
+	_, reasons := score(key, rec, nil, 0)
 	for _, r := range reasons {
 		if strings.Contains(r, "non-browser process") {
 			t.Errorf("browser process should not produce QUIC reason, got: %q", r)
@@ -946,7 +946,7 @@ func TestScore_QUIC_HighRiskASN_AddsReason(t *testing.T) {
 		r.ASNOrg = "BadASN"
 		r.DstIP = "5.5.5.5"
 	})
-	_, reasons := score(key, rec, nil)
+	_, reasons := score(key, rec, nil, 0)
 	found := false
 	for _, r := range reasons {
 		if strings.Contains(r, "QUIC connection to high-risk ASN") {
@@ -967,7 +967,7 @@ func TestScore_LateralMovement_SMB_AddsReason(t *testing.T) {
 		r.SrcIP = "192.168.1.10"
 		r.DstIP = "192.168.1.20"
 	})
-	_, reasons := score(key, rec, nil)
+	_, reasons := score(key, rec, nil, 0)
 	found := false
 	for _, r := range reasons {
 		if strings.Contains(r, "SMB") {
@@ -986,7 +986,7 @@ func TestScore_LateralMovement_PublicDst_NoLateralReason(t *testing.T) {
 		r.SrcIP = "192.168.1.10"
 		r.DstIP = "203.0.113.5"
 	})
-	_, reasons := score(key, rec, nil)
+	_, reasons := score(key, rec, nil, 0)
 	for _, r := range reasons {
 		if strings.Contains(r, "lateral") {
 			t.Errorf("public destination should not trigger lateral movement, got: %q", r)
@@ -1003,7 +1003,7 @@ func TestScore_ProtocolAnomaly_NonTLSOn443_AddsReason(t *testing.T) {
 		// JA3Hash and IsQUIC remain zero-value → triggers non-TLS check
 		r.DstIP = "1.2.3.4"
 	})
-	_, reasons := score(key, rec, nil)
+	_, reasons := score(key, rec, nil, 0)
 	found := false
 	for _, r := range reasons {
 		if strings.Contains(r, "non-TLS traffic on TCP port 443") {
@@ -1023,7 +1023,7 @@ func TestScore_ProtocolAnomaly_TLSPresent_NoAnomalyReason(t *testing.T) {
 		r.JA3Hash = "deadbeef00112233deadbeef00112233"
 		r.DstIP = "1.2.3.4"
 	})
-	_, reasons := score(key, rec, nil)
+	_, reasons := score(key, rec, nil, 0)
 	for _, r := range reasons {
 		if strings.Contains(r, "non-TLS traffic on TCP port 443") {
 			t.Errorf("TLS flow should not trigger non-TLS anomaly, got: %q", r)
@@ -1037,7 +1037,7 @@ func TestScore_ProtocolAnomaly_ExcessiveDNSoverTCP_AddsReason(t *testing.T) {
 		r.ByteCount = 600 * 1024 // 600 KB > 512 KB threshold
 		r.DstIP = "8.8.8.8"
 	})
-	_, reasons := score(key, rec, nil)
+	_, reasons := score(key, rec, nil, 0)
 	found := false
 	for _, r := range reasons {
 		if strings.Contains(r, "excessive DNS over TCP") {
@@ -1057,7 +1057,7 @@ func TestScore_NXDomainStorm_AddsReason(t *testing.T) {
 		r.NXDomainCount = 10 // exceeds default threshold of 5
 		r.DstIP = "8.8.8.8"
 	})
-	_, reasons := score(key, rec, nil)
+	_, reasons := score(key, rec, nil, 0)
 	found := false
 	for _, r := range reasons {
 		if strings.Contains(r, "nxdomain storm") {
@@ -1075,7 +1075,7 @@ func TestScore_NXDomainBelowThreshold_NoReason(t *testing.T) {
 		r.NXDomainCount = 3 // below default threshold of 5
 		r.DstIP = "8.8.8.8"
 	})
-	_, reasons := score(key, rec, nil)
+	_, reasons := score(key, rec, nil, 0)
 	for _, r := range reasons {
 		if strings.Contains(r, "nxdomain storm") {
 			t.Errorf("count=3 should not trigger storm reason, got: %q", r)
@@ -1089,7 +1089,7 @@ func TestScore_FastFluxTTL_AddsReason(t *testing.T) {
 		r.MinDNSTTL = 10 // < 30s threshold
 		r.DstIP = "8.8.8.8"
 	})
-	_, reasons := score(key, rec, nil)
+	_, reasons := score(key, rec, nil, 0)
 	found := false
 	for _, r := range reasons {
 		if strings.Contains(r, "low dns ttl") {
@@ -1107,7 +1107,7 @@ func TestScore_NormalTTL_NoFastFluxReason(t *testing.T) {
 		r.MinDNSTTL = 300 // normal 5-minute TTL
 		r.DstIP = "8.8.8.8"
 	})
-	_, reasons := score(key, rec, nil)
+	_, reasons := score(key, rec, nil, 0)
 	for _, r := range reasons {
 		if strings.Contains(r, "low dns ttl") {
 			t.Errorf("normal TTL=300 should not trigger fast-flux reason, got: %q", r)
@@ -1133,7 +1133,7 @@ func TestAggregatorAdd_NXDomainCountAccumulates(t *testing.T) {
 		})
 	}
 
-	records := agg.Finalize(nil)
+	records := agg.Finalize(nil, nil)
 	if len(records) != 1 {
 		t.Fatalf("expected 1 flow, got %d", len(records))
 	}
@@ -1158,7 +1158,7 @@ func TestAggregatorAdd_MinDNSTTL_TracksMinimum(t *testing.T) {
 		})
 	}
 
-	records := agg.Finalize(nil)
+	records := agg.Finalize(nil, nil)
 	if len(records) != 1 {
 		t.Fatalf("expected 1 flow, got %d", len(records))
 	}
@@ -1182,7 +1182,7 @@ func TestAggregatorAdd_QUIC_Propagates(t *testing.T) {
 		IsQUIC: true,
 	})
 
-	records := agg.Finalize(nil)
+	records := agg.Finalize(nil, nil)
 	if len(records) != 1 {
 		t.Fatalf("expected 1 flow, got %d", len(records))
 	}
@@ -1222,7 +1222,7 @@ func TestFinalize_AsymmetricUpload_AddsReason(t *testing.T) {
 		})
 	}
 
-	records := agg.Finalize(nil)
+	records := agg.Finalize(nil, nil)
 	found := false
 	for _, r := range records {
 		for _, reason := range r.SuspicionReasons {
@@ -1256,7 +1256,7 @@ func TestScore_IPv6RH0_RaisesScore(t *testing.T) {
 	pkt.IsIPv6RH0 = true
 	agg.Add(pkt)
 
-	records := agg.Finalize(nil)
+	records := agg.Finalize(nil, nil)
 	if len(records) == 0 {
 		t.Fatal("expected at least one flow record")
 	}
@@ -1284,7 +1284,7 @@ func TestScore_IPv6Fragment_RaisesScore(t *testing.T) {
 	pkt.IsIPv6Fragment = true
 	agg.Add(pkt)
 
-	records := agg.Finalize(nil)
+	records := agg.Finalize(nil, nil)
 	if len(records) == 0 {
 		t.Fatal("expected at least one flow record")
 	}
@@ -1310,7 +1310,7 @@ func TestScore_IPv6RH0AndFragment_Combined(t *testing.T) {
 	pkt.IsIPv6Fragment = true
 	agg.Add(pkt)
 
-	records := agg.Finalize(nil)
+	records := agg.Finalize(nil, nil)
 	if len(records) == 0 {
 		t.Fatal("expected at least one flow record")
 	}

@@ -169,6 +169,10 @@ type FlowRecord struct {
 	TLSCertIsIPCN      bool   `json:"tls_cert_ip_cn,omitempty"`
 	// IP reputation (blocklist match)
 	IPRepLabel string `json:"ip_rep_label,omitempty"` // non-empty when dst IP matches a threat-intel blocklist
+	// DomRepLabel is set when any DNS query or TLS SNI for this flow matches a
+	// domain reputation feed (URLhaus, ThreatFox, or custom). Non-empty means
+	// the flow communicated with a known malware distribution or C2 domain.
+	DomRepLabel string `json:"dom_rep_label,omitempty"`
 	// Analysis fields
 	SuspicionScore   float64  `json:"suspicion_score"`
 	RiskLevel        string   `json:"risk_level"`
@@ -183,6 +187,11 @@ type FlowRecord struct {
 // ProcessResolver maps a packet four-tuple to the process that owns it.
 // Returning a pointer avoids import cycles; nil means no process identified.
 type ProcessResolver func(srcIP string, srcPort uint16, dstIP string, dstPort uint16, proto string) *ProcessSnapshot
+
+// RecurrenceResolver returns the number of distinct past capture windows that
+// contained a flow from srcIP to dstIP:dstPort/proto. Returns 0 when history
+// is unavailable (first window after daemon start, or no daemon running).
+type RecurrenceResolver func(srcIP, dstIP string, dstPort uint16, proto string) int
 
 // flowState is the mutable, concurrent-safe per-flow accumulator.
 type flowState struct {
@@ -335,8 +344,9 @@ func (a *Aggregator) Add(pkt PacketEvent) {
 
 // Finalize converts all accumulated flow states into scored FlowRecords.
 // resolver may be nil (process info is skipped).
+// recRes may be nil (recurrence scoring is skipped).
 // Records are sorted by SuspicionScore descending (highest risk first).
-func (a *Aggregator) Finalize(resolver ProcessResolver) []FlowRecord {
+func (a *Aggregator) Finalize(resolver ProcessResolver, recRes RecurrenceResolver) []FlowRecord {
 	// ── Pass 1: collect base records and per-flow timestamps ─────────────────
 	type interim struct {
 		rec        FlowRecord
@@ -481,12 +491,28 @@ func (a *Aggregator) Finalize(resolver ProcessResolver) []FlowRecord {
 		if label, ok := intel.IPRepLookup(items[i].rec.DstIP); ok {
 			items[i].rec.IPRepLabel = label
 		}
+		// Domain reputation — check DNS queries and TLS SNI against domain feed.
+		for _, q := range items[i].rec.DNSQueries {
+			if label, ok := intel.DomRepLookup(q); ok {
+				items[i].rec.DomRepLabel = label
+				break
+			}
+		}
+		if items[i].rec.DomRepLabel == "" && items[i].rec.TLSSNIName != "" {
+			if label, ok := intel.DomRepLookup(items[i].rec.TLSSNIName); ok {
+				items[i].rec.DomRepLabel = label
+			}
+		}
 	}
 
 	// ── Pass 3: per-flow scoring ──────────────────────────────────────────────
 	records := make([]FlowRecord, len(items))
 	for i, it := range items {
-		it.rec.SuspicionScore, it.rec.SuspicionReasons = score(it.key, it.rec, it.timestamps)
+		recurrence := 0
+		if recRes != nil {
+			recurrence = recRes(it.rec.SrcIP, it.rec.DstIP, it.rec.DstPort, it.rec.Protocol)
+		}
+		it.rec.SuspicionScore, it.rec.SuspicionReasons = score(it.key, it.rec, it.timestamps, recurrence)
 		it.rec.MITRETechniques = intel.TagFlow(it.rec.SuspicionReasons)
 		it.rec.CleanSignals = computeCleanSignals(it.rec)
 		it.rec.RiskLevel = riskLabel(it.rec.SuspicionScore)
@@ -788,7 +814,7 @@ func lateralMovementSignal(dstPort uint16) (float64, string) {
 	return 0, ""
 }
 
-func score(key FlowKey, rec FlowRecord, ts []time.Time) (float64, []string) {
+func score(key FlowKey, rec FlowRecord, ts []time.Time, recurrence int) (float64, []string) {
 	cfg := config.Get().Scoring
 	sm := newScoreMap()
 	var reasons []string
@@ -923,12 +949,44 @@ func score(key FlowKey, rec FlowRecord, ts []time.Time) (float64, []string) {
 		}
 	}
 
+	// ── Slow-and-low C2 detection (cross-window recurrence) ─────────────────
+	// A flow appearing in many distinct capture windows without investigation
+	// is unlikely to be benign. System services and exempted processes are skipped.
+	if recurrence >= 3 && pctx != ctxSystem && !exempted {
+		switch {
+		case recurrence >= 20:
+			addTo(&sm.behavioral, 2.0, fmt.Sprintf("persistent flow: seen in %d distinct capture windows (slow-and-low indicator)", recurrence))
+		case recurrence >= 10:
+			addTo(&sm.behavioral, 1.5, fmt.Sprintf("recurring flow: seen in %d distinct capture windows", recurrence))
+		case recurrence >= 5:
+			addTo(&sm.behavioral, 1.0, fmt.Sprintf("recurring flow: seen in %d distinct capture windows", recurrence))
+		default:
+			addTo(&sm.behavioral, 0.5, fmt.Sprintf("recurring flow: seen in %d distinct capture windows", recurrence))
+		}
+	}
+
+	// ── New destination for known process ────────────────────────────────────
+	// A process connecting to an IP it has never used before may indicate
+	// initial compromise or C2 channel establishment.
+	if !exempted && pctx != ctxSystem {
+		if isNew, confident := baseline.IsNewDestination(rec.ProcessName, rec.DstIP); isNew && confident {
+			addTo(&sm.behavioral, 1.5, fmt.Sprintf("new destination for process %q: %s not seen in baseline", rec.ProcessName, rec.DstIP))
+		}
+	}
+
+	// ── Domain reputation ─────────────────────────────────────────────────────
+	if rec.DomRepLabel != "" {
+		addTo(&sm.dns, 2.0, fmt.Sprintf("domain on threat-intel list: %s", rec.DomRepLabel))
+	}
+
 	// ── Beaconing detection ─────────────────────────────────────────────────
 	// System services (NTP, journald, etc.) have inherently regular heartbeats
 	// — mask beaconing to avoid constant false positives on system processes.
 	if !cfg.DisableBeaconingScoring && !exempted && pctx != ctxSystem {
-		if bs, reason := beaconingScore(ts, cfg); bs > 0 {
-			addTo(&sm.behavioral, bs, reason)
+		if !baseline.IsExpectedBeaconer(rec.ProcessName) {
+			if bs, reason := beaconingScore(ts, cfg); bs > 0 {
+				addTo(&sm.behavioral, bs, reason)
+			}
 		}
 	}
 

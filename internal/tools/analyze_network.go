@@ -139,7 +139,7 @@ func analyzeNetworkHandler(ctx context.Context, req mcp.CallToolRequest) (*mcp.C
 	}
 
 	// ── Score, filter, summarise ─────────────────────────────────────────────
-	allFlows := agg.Finalize(resolver)
+	allFlows := agg.Finalize(resolver, nil)
 	history.Append("live:"+ifaceName, allFlows)
 	summary := aggregate.Summarise(allFlows) // summary over ALL flows before filtering
 	flows := aggregate.FilterOptions{MinScore: minScore, TopN: topN}.Apply(allFlows)

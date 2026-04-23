@@ -154,7 +154,7 @@ func liveWatchHandler(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallTo
 		totalPackets++
 	}
 
-	allFlows := agg.Finalize(resolver)
+	allFlows := agg.Finalize(resolver, nil)
 
 	// Filter to the requested process and/or IP.
 	processFilterLow := strings.ToLower(processFilter)

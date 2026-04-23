@@ -9,6 +9,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -147,6 +148,11 @@ func Run(ctx context.Context) error {
 		go runIPRepUpdater(ctx, cfg.IPRep)
 	}
 
+	// Start domain reputation feed updater if enabled.
+	if cfg.DomRep.Enabled && (len(cfg.DomRep.URLs) > 0 || cfg.DomRep.LocalFile != "") {
+		go runDomRepUpdater(ctx, cfg.DomRep)
+	}
+
 	// Initialise behavioural baseline from persisted state.
 	// The cache directory mirrors the XDG_CACHE_HOME convention.
 	baseline.Init(baselineCacheDir())
@@ -191,6 +197,29 @@ func runHasshFeedUpdater(ctx context.Context, hcfg config.HasshFeedConfig) {
 		case <-ticker.C:
 			if err := capture.UpdateHasshFeed(hcfg.URLs, hcfg.LocalFile); err != nil {
 				log.Printf("hasshfeed: periodic update failed: %v", err)
+			}
+		}
+	}
+}
+
+// runDomRepUpdater performs an initial domain reputation feed fetch then refreshes on a ticker.
+func runDomRepUpdater(ctx context.Context, dcfg config.DomRepConfig) {
+	if err := intel.UpdateDomRep(dcfg.URLs, dcfg.LocalFile); err != nil {
+		log.Printf("domrep: initial update failed: %v", err)
+	}
+	interval := time.Duration(dcfg.UpdateIntervalHours) * time.Hour
+	if interval <= 0 {
+		interval = 24 * time.Hour
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if err := intel.UpdateDomRep(dcfg.URLs, dcfg.LocalFile); err != nil {
+				log.Printf("domrep: periodic update failed: %v", err)
 			}
 		}
 	}
@@ -334,7 +363,16 @@ func runWindow(ctx context.Context, ifaces []string, bpfFilter string, dur time.
 		}
 	}
 
-	flows := agg.Finalize(resolver)
+	// Build a recurrence map from the last 24 h of history before scoring.
+	// This is O(history_size) once per window, amortised to O(1) per flow.
+	recMap := history.RecurrenceMap(time.Now().Add(-24 * time.Hour))
+	recurrenceResolver := func(srcIP, dstIP string, dstPort uint16, proto string) int {
+		if recMap == nil {
+			return 0
+		}
+		return recMap[history.RecurrenceKey(srcIP, dstIP, dstPort, proto)]
+	}
+	flows := agg.Finalize(resolver, recurrenceResolver)
 	if len(flows) == 0 {
 		windowsRun.Add(1)
 		return nil
@@ -347,6 +385,14 @@ func runWindow(ctx context.Context, ifaces []string, bpfFilter string, dur time.
 	// detect anomalies relative to historical behaviour.
 	for _, f := range flows {
 		baseline.Observe(f.ProcessName, f.DstPort, f.ByteCount)
+		baseline.ObserveDest(f.ProcessName, f.DstIP)
+		// Track beaconing patterns for known-good beaconer suppression.
+		for _, reason := range f.SuspicionReasons {
+			if strings.HasPrefix(reason, "strong beaconing") || strings.HasPrefix(reason, "possible beaconing") {
+				baseline.ObserveBeaconing(f.ProcessName)
+				break
+			}
+		}
 	}
 	// Flush baseline to disk after each window (atomic rename — cheap).
 	if err := baseline.Persist(); err != nil {

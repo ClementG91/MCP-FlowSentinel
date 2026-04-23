@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -321,6 +322,74 @@ func filterFlows(flows []aggregate.FlowRecord, opts QueryOpts) []aggregate.FlowR
 		out = out[:opts.TopN]
 	}
 	return out
+}
+
+// RecurrenceKey returns the canonical string key for a flow tuple.
+// Exported so callers can construct matching keys without duplicating format.
+func RecurrenceKey(srcIP, dstIP string, dstPort uint16, proto string) string {
+	return srcIP + "\x00" + dstIP + "\x00" + strconv.FormatUint(uint64(dstPort), 10) + "\x00" + proto
+}
+
+// RecurrenceMap returns a map from RecurrenceKey to the number of distinct
+// capture windows that contained a matching flow within the lookback period.
+// Each Entry is counted at most once per flow key (duplicate flows in the same
+// window are deduplicated). Used for slow-and-low C2 detection.
+func RecurrenceMap(since time.Time) map[string]int {
+	mu.Lock()
+	defer mu.Unlock()
+
+	f, err := os.Open(histPath)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return nil
+	}
+	defer f.Close()
+
+	if len(offsetIndex) == 0 {
+		buildIndex(f) //nolint:errcheck
+	}
+	startOffset := int64(0)
+	if n := len(offsetIndex); n > 0 {
+		lo, hi := 0, n
+		for lo < hi {
+			mid := (lo + hi) / 2
+			if offsetIndex[mid].ts.Before(since) {
+				lo = mid + 1
+			} else {
+				hi = mid
+			}
+		}
+		if lo > 0 {
+			startOffset = offsetIndex[lo-1].offset
+		}
+	}
+	if _, err := f.Seek(startOffset, 0); err != nil {
+		return nil
+	}
+
+	counts := make(map[string]int)
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 4*1024*1024), 4*1024*1024)
+	for scanner.Scan() {
+		var e Entry
+		if err := json.Unmarshal(scanner.Bytes(), &e); err != nil {
+			continue
+		}
+		if e.Timestamp.Before(since) {
+			continue
+		}
+		seen := make(map[string]struct{}, len(e.Flows))
+		for _, fl := range e.Flows {
+			k := RecurrenceKey(fl.SrcIP, fl.DstIP, fl.DstPort, fl.Protocol)
+			if _, dup := seen[k]; !dup {
+				seen[k] = struct{}{}
+				counts[k]++
+			}
+		}
+	}
+	return counts
 }
 
 // SetPathForTesting overrides the history file path and resets all state.

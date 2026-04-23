@@ -22,16 +22,13 @@ import (
 // ─── Internal state ───────────────────────────────────────────────────────────
 
 // entry holds Welford online statistics for a single (processName, dstPort) key.
-// The statistics track byte counts per flow over successive observation windows.
 type entry struct {
-	N        int64     `json:"n"`          // number of observations
-	MeanB    float64   `json:"mean_bytes"` // running mean of bytes
-	M2B      float64   `json:"m2_bytes"`   // sum of squared deviations (Welford M2)
+	N        int64     `json:"n"`
+	MeanB    float64   `json:"mean_bytes"`
+	M2B      float64   `json:"m2_bytes"`
 	LastSeen time.Time `json:"last_seen"`
 }
 
-// welfordUpdate applies one Welford step to (n, mean, M2) and returns updated values.
-// See Knuth TAOCP Vol 2, §4.2.2.
 func (e *entry) observe(x float64) {
 	e.N++
 	delta := x - e.MeanB
@@ -40,7 +37,6 @@ func (e *entry) observe(x float64) {
 	e.M2B += delta * delta2
 }
 
-// stddev returns the sample standard deviation (0 when N < 2).
 func (e *entry) stddev() float64 {
 	if e.N < 2 {
 		return 0
@@ -48,7 +44,6 @@ func (e *entry) stddev() float64 {
 	return math.Sqrt(e.M2B / float64(e.N-1))
 }
 
-// zScore returns the Z-score for value x. Returns 0 when stddev is 0.
 func (e *entry) zScore(x float64) float64 {
 	sd := e.stddev()
 	if sd == 0 {
@@ -57,29 +52,57 @@ func (e *entry) zScore(x float64) float64 {
 	return (x - e.MeanB) / sd
 }
 
-// stale returns true if this entry has not been updated in > stalePeriod.
 const stalePeriod = 72 * time.Hour
 
 func (e *entry) stale() bool {
 	return !e.LastSeen.IsZero() && time.Since(e.LastSeen) > stalePeriod
 }
 
-// minObservations is the minimum number of samples before the multiplier is
-// anything other than neutral (1.0). Below this threshold there is not enough
-// data to distinguish anomaly from noise.
 const minObservations = 5
+
+// ─── Destination tracking ─────────────────────────────────────────────────────
+
+// maxDests is the maximum number of destination IPs tracked per process.
+// Beyond this the set is full and new IPs are counted but not remembered.
+const maxDests = 2000
+
+// minDestObs is the minimum total connections before IsNewDestination is
+// meaningful. Below this we don't have enough data to flag new destinations.
+const minDestObs = 5
+
+// destEntry tracks the set of destination IPs a process has connected to.
+type destEntry struct {
+	Seen  map[string]bool `json:"seen"`
+	Count int             `json:"count"` // total connections (including overflow)
+}
+
+// ─── Beaconing tracking ───────────────────────────────────────────────────────
+
+// minBeaconingObs is the number of beaconing detections after which a process
+// is classified as an "expected beaconer" and the signal is suppressed.
+const minBeaconingObs = 10
+
+// beaconEntry counts how many capture windows triggered beaconing scoring
+// for a given process name.
+type beaconEntry struct {
+	Count int `json:"count"`
+}
 
 // ─── Store ────────────────────────────────────────────────────────────────────
 
 // store is the in-memory baseline database.
 type store struct {
-	mu       sync.RWMutex
-	entries  map[string]*entry
-	cacheDir string
+	mu        sync.RWMutex
+	entries   map[string]*entry       // key: "processName:port"
+	dests     map[string]*destEntry   // key: processName (lowercase)
+	beaconing map[string]*beaconEntry // key: processName (lowercase)
+	cacheDir  string
 }
 
 var global = &store{
-	entries: make(map[string]*entry),
+	entries:   make(map[string]*entry),
+	dests:     make(map[string]*destEntry),
+	beaconing: make(map[string]*beaconEntry),
 }
 
 // makeKey returns the canonical lookup key for (process, port).
@@ -100,7 +123,6 @@ func portStr(p uint16) string {
 		n++
 		tmp /= 10
 	}
-	// reverse
 	for i, j := 0, n-1; i < j; i, j = i+1, j-1 {
 		b[i], b[j] = b[j], b[i]
 	}
@@ -111,7 +133,6 @@ func portStr(p uint16) string {
 
 // Init initialises the global store, loading any previously persisted data from
 // cacheDir. Safe to call multiple times (subsequent calls reload from disk).
-// cacheDir is typically ~/.cache/mcp-flowsentinel/.
 func Init(cacheDir string) {
 	global.mu.Lock()
 	global.cacheDir = cacheDir
@@ -120,8 +141,6 @@ func Init(cacheDir string) {
 }
 
 // Observe records one observation for the given (processName, dstPort) key.
-// bytes is the byte count transferred in the flow. Call this once per scored
-// flow, after the final risk score has been assigned to a FlowRecord.
 func Observe(processName string, dstPort uint16, bytes int64) {
 	if processName == "" {
 		return
@@ -140,16 +159,89 @@ func Observe(processName string, dstPort uint16, bytes int64) {
 	global.mu.Unlock()
 }
 
+// ObserveDest records that processName connected to dstIP.
+// Call this after Finalize() for each scored flow.
+func ObserveDest(processName, dstIP string) {
+	if processName == "" || dstIP == "" {
+		return
+	}
+	proc := strings.ToLower(processName)
+
+	global.mu.Lock()
+	de, ok := global.dests[proc]
+	if !ok {
+		de = &destEntry{Seen: make(map[string]bool)}
+		global.dests[proc] = de
+	}
+	de.Count++
+	if !de.Seen[dstIP] && len(de.Seen) < maxDests {
+		de.Seen[dstIP] = true
+	}
+	global.mu.Unlock()
+}
+
+// IsNewDestination returns (isNew=true, confident=true) when the process has
+// been observed at least minDestObs times and dstIP has never been seen for it.
+// Returns (false, false) on cold start (< minDestObs observations).
+func IsNewDestination(processName, dstIP string) (isNew bool, confident bool) {
+	if processName == "" || dstIP == "" {
+		return false, false
+	}
+	proc := strings.ToLower(processName)
+
+	global.mu.RLock()
+	de, ok := global.dests[proc]
+	if !ok || de.Count < minDestObs {
+		global.mu.RUnlock()
+		return false, false
+	}
+	seen := de.Seen[dstIP]
+	global.mu.RUnlock()
+
+	return !seen, true
+}
+
+// ObserveBeaconing records that processName triggered beaconing scoring.
+// After minBeaconingObs observations the process becomes an expected beaconer.
+func ObserveBeaconing(processName string) {
+	if processName == "" {
+		return
+	}
+	proc := strings.ToLower(processName)
+
+	global.mu.Lock()
+	be, ok := global.beaconing[proc]
+	if !ok {
+		be = &beaconEntry{}
+		global.beaconing[proc] = be
+	}
+	be.Count++
+	global.mu.Unlock()
+}
+
+// IsExpectedBeaconer returns true when processName has triggered beaconing in
+// at least minBeaconingObs capture windows. These processes exhibit regular
+// heartbeats as normal behaviour and should have the signal suppressed.
+func IsExpectedBeaconer(processName string) bool {
+	if processName == "" {
+		return false
+	}
+	proc := strings.ToLower(processName)
+
+	global.mu.RLock()
+	be, ok := global.beaconing[proc]
+	if !ok {
+		global.mu.RUnlock()
+		return false
+	}
+	count := be.Count
+	global.mu.RUnlock()
+
+	return count >= minBeaconingObs
+}
+
 // AnomalyMultiplier returns a score multiplier based on how anomalous bytes is
 // relative to the historical baseline for (processName, dstPort).
-//
-// Multiplier table:
-//
-//	N < minObservations : 1.0  (no baseline yet)
-//	Z  <  1σ            : 0.7  (within normal — dampen minor signals)
-//	1σ ≤ Z  <  2σ       : 1.0  (normal variation — no change)
-//	2σ ≤ Z  <  3σ       : 1.3  (elevated — slightly amplify)
-//	Z  ≥  3σ            : 1.8  (anomalous — significantly amplify)
 func AnomalyMultiplier(processName string, dstPort uint16, bytes int64) float64 {
 	if processName == "" {
 		return 1.0
@@ -178,7 +270,6 @@ func AnomalyMultiplier(processName string, dstPort uint16, bytes int64) float64 
 }
 
 // Prune removes entries that have not been observed in more than stalePeriod.
-// It is called automatically during Persist but can also be called manually.
 func Prune() {
 	global.mu.Lock()
 	defer global.mu.Unlock()
@@ -196,7 +287,23 @@ func Size() int {
 	return len(global.entries)
 }
 
+// MinDestObs returns the minimum observations threshold for IsNewDestination.
+// Exported for testing only.
+func MinDestObs() int { return minDestObs }
+
+// MinBeaconingObs returns the beaconing observation threshold.
+// Exported for testing only.
+func MinBeaconingObs() int { return minBeaconingObs }
+
 // ─── Persistence ──────────────────────────────────────────────────────────────
+
+// persistData is the on-disk representation of the full baseline state.
+// The "entries" key distinguishes new format from the legacy map[string]*entry.
+type persistData struct {
+	Entries   map[string]*entry       `json:"entries"`
+	Dests     map[string]*destEntry   `json:"dests,omitempty"`
+	Beaconing map[string]*beaconEntry `json:"beaconing,omitempty"`
+}
 
 func cachePath() string {
 	global.mu.RLock()
@@ -208,8 +315,8 @@ func cachePath() string {
 	return filepath.Join(dir, "baseline.json")
 }
 
-// Persist flushes the current in-memory state to disk (atomic write via rename).
-// Stale entries are pruned before writing. A missing cacheDir is silently ignored.
+// Persist flushes current state to disk (atomic write via rename).
+// Stale entries are pruned before writing.
 func Persist() error {
 	Prune()
 
@@ -222,7 +329,11 @@ func Persist() error {
 	}
 
 	global.mu.RLock()
-	data, err := json.Marshal(global.entries)
+	data, err := json.Marshal(persistData{
+		Entries:   global.entries,
+		Dests:     global.dests,
+		Beaconing: global.beaconing,
+	})
 	global.mu.RUnlock()
 	if err != nil {
 		return err
@@ -243,18 +354,37 @@ func load() {
 	}
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return // file absent or unreadable — start fresh
-	}
-	var loaded map[string]*entry
-	if err := json.Unmarshal(data, &loaded); err != nil {
-		return // corrupt file — start fresh
+		return
 	}
 
-	global.mu.Lock()
-	for k, e := range loaded {
-		if !e.stale() {
-			global.entries[k] = e
+	// Try new format first: {"entries": {...}, "dests": {...}, "beaconing": {...}}.
+	var pd persistData
+	if json.Unmarshal(data, &pd) == nil && pd.Entries != nil {
+		global.mu.Lock()
+		for k, e := range pd.Entries {
+			if !e.stale() {
+				global.entries[k] = e
+			}
 		}
+		if pd.Dests != nil {
+			global.dests = pd.Dests
+		}
+		if pd.Beaconing != nil {
+			global.beaconing = pd.Beaconing
+		}
+		global.mu.Unlock()
+		return
 	}
-	global.mu.Unlock()
+
+	// Fall back to legacy format: raw map[string]*entry.
+	var legacy map[string]*entry
+	if json.Unmarshal(data, &legacy) == nil {
+		global.mu.Lock()
+		for k, e := range legacy {
+			if !e.stale() {
+				global.entries[k] = e
+			}
+		}
+		global.mu.Unlock()
+	}
 }

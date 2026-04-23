@@ -118,7 +118,7 @@ func analyzePcapHandler(ctx context.Context, req mcp.CallToolRequest) (*mcp.Call
 		totalPackets++
 	}
 
-	allFlows := agg.Finalize(resolver)
+	allFlows := agg.Finalize(resolver, nil)
 	history.Append("pcap:"+filePath, allFlows)
 	summary := aggregate.Summarise(allFlows)
 	flows := aggregate.FilterOptions{MinScore: minScore, TopN: topN}.Apply(allFlows)
