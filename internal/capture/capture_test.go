@@ -908,3 +908,188 @@ func TestOfflineReader_Read_BufferFull_CtxDoneExits(t *testing.T) {
 	for range ch {
 	}
 }
+
+// ─── isQUICInitial ────────────────────────────────────────────────────────────
+
+func TestIsQUICInitial(t *testing.T) {
+	tests := []struct {
+		name    string
+		payload []byte
+		want    bool
+	}{
+		{
+			name:    "valid QUIC v1 long header",
+			payload: []byte{0xC0, 0x00, 0x00, 0x00, 0x01, 0xFF},
+			want:    true,
+		},
+		{
+			name:    "too short",
+			payload: []byte{0xC0, 0x00},
+			want:    false,
+		},
+		{
+			name:    "bit 7 not set (short header)",
+			payload: []byte{0x40, 0x00, 0x00, 0x00, 0x01},
+			want:    false,
+		},
+		{
+			name:    "bit 6 not set",
+			payload: []byte{0x80, 0x00, 0x00, 0x00, 0x01},
+			want:    false,
+		},
+		{
+			name:    "wrong QUIC version (v2)",
+			payload: []byte{0xC0, 0x00, 0x00, 0x00, 0x02},
+			want:    false,
+		},
+		{
+			name:    "version field all zeros",
+			payload: []byte{0xC0, 0x00, 0x00, 0x00, 0x00},
+			want:    false,
+		},
+		{
+			name:    "empty payload",
+			payload: []byte{},
+			want:    false,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isQUICInitial(tc.payload); got != tc.want {
+				t.Errorf("isQUICInitial(%v) = %v, want %v", tc.payload, got, tc.want)
+			}
+		})
+	}
+}
+
+// ─── extractDNSResponse ───────────────────────────────────────────────────────
+
+// buildDNSResponseWithAnswers creates a full DNS response packet with the
+// given answers. rcode=0 for NOERROR, 3 for NXDOMAIN.
+func buildDNSResponseWithAnswers(rcode layers.DNSResponseCode, answers []layers.DNSResourceRecord) gopacket.Packet {
+	eth := &layers.Ethernet{
+		SrcMAC:       net.HardwareAddr{0, 0, 0, 0, 0, 0},
+		DstMAC:       net.HardwareAddr{0, 0, 0, 0, 0, 0},
+		EthernetType: layers.EthernetTypeIPv4,
+	}
+	ip := &layers.IPv4{
+		Version:  4,
+		TTL:      64,
+		Protocol: layers.IPProtocolUDP,
+		SrcIP:    net.ParseIP("8.8.8.8").To4(),
+		DstIP:    net.ParseIP("192.168.1.1").To4(),
+	}
+	udp := &layers.UDP{SrcPort: 53, DstPort: 54321}
+	if err := udp.SetNetworkLayerForChecksum(ip); err != nil {
+		panic(err)
+	}
+	dns := &layers.DNS{
+		QR:           true,
+		ResponseCode: rcode,
+		Questions: []layers.DNSQuestion{
+			{Name: []byte("example.com"), Type: layers.DNSTypeA, Class: layers.DNSClassIN},
+		},
+		Answers: answers,
+	}
+	buf := gopacket.NewSerializeBuffer()
+	opts := gopacket.SerializeOptions{FixLengths: true, ComputeChecksums: true}
+	if err := gopacket.SerializeLayers(buf, opts, eth, ip, udp, dns); err != nil {
+		panic(err)
+	}
+	return gopacket.NewPacket(buf.Bytes(), layers.LayerTypeEthernet, gopacket.Default)
+}
+
+func TestExtractDNSResponse(t *testing.T) {
+	tests := []struct {
+		name       string
+		pkt        gopacket.Packet
+		wantNX     bool
+		wantMinTTL uint32
+	}{
+		{
+			name:       "query packet is ignored",
+			pkt:        buildDNSQueryPacket("example.com"),
+			wantNX:     false,
+			wantMinTTL: 0,
+		},
+		{
+			name:       "no DNS layer",
+			pkt:        buildIPv4TCPPacket(t, "8.8.8.8", "1.2.3.4", 53, 54321, nil),
+			wantNX:     false,
+			wantMinTTL: 0,
+		},
+		{
+			name: "NXDOMAIN with no answers",
+			pkt: buildDNSResponseWithAnswers(layers.DNSResponseCodeNXDomain, nil),
+			wantNX:     true,
+			wantMinTTL: 0,
+		},
+		{
+			name: "NOERROR with single A record TTL 300",
+			pkt: buildDNSResponseWithAnswers(layers.DNSResponseCodeNoErr, []layers.DNSResourceRecord{
+				{Name: []byte("example.com"), Type: layers.DNSTypeA, TTL: 300, IP: net.ParseIP("1.2.3.4").To4()},
+			}),
+			wantNX:     false,
+			wantMinTTL: 300,
+		},
+		{
+			name: "multiple A records — returns minimum TTL",
+			pkt: buildDNSResponseWithAnswers(layers.DNSResponseCodeNoErr, []layers.DNSResourceRecord{
+				{Name: []byte("a.example.com"), Type: layers.DNSTypeA, TTL: 600, IP: net.ParseIP("1.1.1.1").To4()},
+				{Name: []byte("b.example.com"), Type: layers.DNSTypeA, TTL: 60, IP: net.ParseIP("2.2.2.2").To4()},
+				{Name: []byte("c.example.com"), Type: layers.DNSTypeA, TTL: 3600, IP: net.ParseIP("3.3.3.3").To4()},
+			}),
+			wantNX:     false,
+			wantMinTTL: 60,
+		},
+		{
+			name: "fast-flux TTL=0 is preserved (not treated as absent)",
+			pkt: buildDNSResponseWithAnswers(layers.DNSResponseCodeNoErr, []layers.DNSResourceRecord{
+				{Name: []byte("fast.example.com"), Type: layers.DNSTypeA, TTL: 0, IP: net.ParseIP("5.5.5.5").To4()},
+				{Name: []byte("fast.example.com"), Type: layers.DNSTypeA, TTL: 100, IP: net.ParseIP("6.6.6.6").To4()},
+			}),
+			wantNX:     false,
+			wantMinTTL: 0,
+		},
+		{
+			name: "only MX records — no A/AAAA — minTTL stays 0",
+			pkt: buildDNSResponseWithAnswers(layers.DNSResponseCodeNoErr, []layers.DNSResourceRecord{
+				{Name: []byte("example.com"), Type: layers.DNSTypeMX, TTL: 3600},
+			}),
+			wantNX:     false,
+			wantMinTTL: 0,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			gotNX, gotMinTTL := extractDNSResponse(tc.pkt)
+			if gotNX != tc.wantNX {
+				t.Errorf("nxdomain: got %v, want %v", gotNX, tc.wantNX)
+			}
+			if gotMinTTL != tc.wantMinTTL {
+				t.Errorf("minTTL: got %d, want %d", gotMinTTL, tc.wantMinTTL)
+			}
+		})
+	}
+}
+
+// ─── hasshSourceLabel ─────────────────────────────────────────────────────────
+
+func TestHasshSourceLabel(t *testing.T) {
+	tests := []struct {
+		url  string
+		want string
+	}{
+		{"https://github.com/salesforce/hassh/raw/master/python/hassh.json", "salesforce"},
+		{"https://sslbl.abuse.ch/blacklist/hassh.csv", "abuse.ch"},
+		{"https://example.com/my-custom-feed.csv", "custom_url"},
+		{"", "custom_url"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.url, func(t *testing.T) {
+			if got := hasshSourceLabel(tc.url); got != tc.want {
+				t.Errorf("hasshSourceLabel(%q) = %q, want %q", tc.url, got, tc.want)
+			}
+		})
+	}
+}

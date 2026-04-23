@@ -546,3 +546,108 @@ func TestAlertingMinScoreThreshold_Validation(t *testing.T) {
 func formatFloat(f float64) string {
 	return fmt.Sprintf("%g", f)
 }
+
+// ─── DomRep config merge ──────────────────────────────────────────────────────
+
+func TestLoad_DomRep_DefaultsDisabled(t *testing.T) {
+	cfg := Default()
+	if cfg.DomRep.Enabled {
+		t.Error("DomRep should be disabled by default")
+	}
+	if len(cfg.DomRep.URLs) == 0 {
+		t.Error("DomRep should have default URLs")
+	}
+	if cfg.DomRep.UpdateIntervalHours == 0 {
+		t.Error("DomRep.UpdateIntervalHours should have a default")
+	}
+}
+
+func TestLoad_DomRep_EnabledViaYAML(t *testing.T) {
+	yaml := `
+capture:
+  default_duration_seconds: 5
+  max_duration_seconds: 60
+  dns_timeout_ms: 200
+  dns_workers: 20
+scoring:
+  beaconing_strong_cv: 0.15
+  beaconing_possible_cv: 0.30
+  beaconing_min_packets: 5
+  dns_entropy_threshold: 3.5
+  scan_confirmed_destinations: 20
+  scan_possible_destinations: 8
+history:
+  max_size_mb: 50
+  max_age_hours: 24
+  prune_to_hours: 12
+daemon:
+  capture_interval_seconds: 300
+dom_rep:
+  enabled: true
+  update_interval_hours: 12
+  local_file: "/tmp/domains.txt"
+  urls:
+    - https://custom.example.com/domains.txt
+`
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte(yaml), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !cfg.DomRep.Enabled {
+		t.Error("DomRep.Enabled should be true")
+	}
+	if cfg.DomRep.UpdateIntervalHours != 12 {
+		t.Errorf("DomRep.UpdateIntervalHours = %d, want 12", cfg.DomRep.UpdateIntervalHours)
+	}
+	if cfg.DomRep.LocalFile != "/tmp/domains.txt" {
+		t.Errorf("DomRep.LocalFile = %q, want /tmp/domains.txt", cfg.DomRep.LocalFile)
+	}
+	if len(cfg.DomRep.URLs) != 1 || cfg.DomRep.URLs[0] != "https://custom.example.com/domains.txt" {
+		t.Errorf("DomRep.URLs = %v, want single custom URL", cfg.DomRep.URLs)
+	}
+}
+
+func TestLoad_DomRep_PartialOverride_DefaultURLsKept(t *testing.T) {
+	// When dom_rep block only sets enabled=true without URLs, default URLs are preserved.
+	yaml := `
+capture:
+  default_duration_seconds: 5
+  max_duration_seconds: 60
+  dns_timeout_ms: 200
+  dns_workers: 20
+scoring:
+  beaconing_strong_cv: 0.15
+  beaconing_possible_cv: 0.30
+  beaconing_min_packets: 5
+  dns_entropy_threshold: 3.5
+  scan_confirmed_destinations: 20
+  scan_possible_destinations: 8
+history:
+  max_size_mb: 50
+  max_age_hours: 24
+  prune_to_hours: 12
+daemon:
+  capture_interval_seconds: 300
+dom_rep:
+  enabled: true
+`
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte(yaml), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !cfg.DomRep.Enabled {
+		t.Error("DomRep.Enabled should be true")
+	}
+	// Default URLs should still be present when not overridden.
+	if len(cfg.DomRep.URLs) == 0 {
+		t.Error("DomRep.URLs should fall back to defaults when not specified")
+	}
+}
