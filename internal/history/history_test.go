@@ -784,3 +784,98 @@ func TestRotateOldEntriesToGzip_PurgesOldGzFiles(t *testing.T) {
 		t.Errorf("expected old gz file to be purged, but it still exists (err=%v)", err)
 	}
 }
+
+// ─── RecurrenceKey / RecurrenceMap tests ──────────────────────────────────────
+
+func TestRecurrenceKey_Format(t *testing.T) {
+	k := RecurrenceKey("1.2.3.4", "5.6.7.8", 443, "TCP")
+	parts := strings.Split(k, "\x00")
+	if len(parts) != 4 {
+		t.Fatalf("expected 4 parts, got %d: %q", len(parts), k)
+	}
+	if parts[0] != "1.2.3.4" || parts[1] != "5.6.7.8" || parts[2] != "443" || parts[3] != "TCP" {
+		t.Errorf("unexpected parts: %v", parts)
+	}
+}
+
+func TestRecurrenceMap_EmptyFile(t *testing.T) {
+	setup(t)
+	m := RecurrenceMap(time.Now().Add(-1 * time.Hour))
+	// An empty history file should return an empty (non-nil) map or nil — both are fine.
+	for k, v := range m {
+		if v < 0 {
+			t.Errorf("negative count for key %s", k)
+		}
+	}
+}
+
+func TestRecurrenceMap_CountsDistinctWindows(t *testing.T) {
+	setup(t)
+
+	flow := makeFlow("10.0.0.1", "8.8.8.8", "beacon", 3.0)
+	flow.DstPort = 53
+	flow.Protocol = "UDP"
+
+	// Inject the same flow key in 3 separate history windows.
+	for i := 0; i < 3; i++ {
+		injectEntry(t, Entry{
+			SchemaVersion: currentSchemaVersion,
+			Timestamp:     time.Now().UTC().Add(-time.Duration(i+1) * 30 * time.Minute),
+			Source:        fmt.Sprintf("window-%d", i),
+			FlowCount:     1,
+			Flows:         []aggregate.FlowRecord{flow},
+		})
+	}
+
+	key := RecurrenceKey(flow.SrcIP, flow.DstIP, flow.DstPort, flow.Protocol)
+	m := RecurrenceMap(time.Now().Add(-3 * time.Hour))
+	if m[key] != 3 {
+		t.Errorf("expected recurrence=3, got %d", m[key])
+	}
+}
+
+func TestRecurrenceMap_DeduplicatesWithinWindow(t *testing.T) {
+	setup(t)
+
+	flow := makeFlow("10.0.0.2", "1.1.1.1", "curl", 1.0)
+	flow.DstPort = 443
+	flow.Protocol = "TCP"
+
+	// Inject one window that contains the same flow key twice (duplicate within window).
+	injectEntry(t, Entry{
+		SchemaVersion: currentSchemaVersion,
+		Timestamp:     time.Now().UTC().Add(-10 * time.Minute),
+		Source:        "dedup-window",
+		FlowCount:     2,
+		Flows:         []aggregate.FlowRecord{flow, flow},
+	})
+
+	key := RecurrenceKey(flow.SrcIP, flow.DstIP, flow.DstPort, flow.Protocol)
+	m := RecurrenceMap(time.Now().Add(-1 * time.Hour))
+	if m[key] != 1 {
+		t.Errorf("expected recurrence=1 (deduplicated within window), got %d", m[key])
+	}
+}
+
+func TestRecurrenceMap_RespectsLookbackWindow(t *testing.T) {
+	setup(t)
+
+	flow := makeFlow("10.0.0.3", "9.9.9.9", "old-proc", 2.0)
+	flow.DstPort = 80
+	flow.Protocol = "TCP"
+
+	// Old entry — outside the 1-hour lookback.
+	injectEntry(t, Entry{
+		SchemaVersion: currentSchemaVersion,
+		Timestamp:     time.Now().UTC().Add(-2 * time.Hour),
+		Source:        "old-window",
+		FlowCount:     1,
+		Flows:         []aggregate.FlowRecord{flow},
+	})
+
+	key := RecurrenceKey(flow.SrcIP, flow.DstIP, flow.DstPort, flow.Protocol)
+	m := RecurrenceMap(time.Now().Add(-1 * time.Hour))
+	if m[key] != 0 {
+		t.Errorf("expected recurrence=0 (entry older than lookback), got %d", m[key])
+	}
+}
