@@ -35,13 +35,16 @@ var (
 )
 
 // domRepCachePath is the on-disk JSON cache for domain reputation data.
-var domRepCachePath = func() string {
+var domRepCachePath string
+
+func init() {
 	home, _ := os.UserHomeDir()
 	if home == "" {
 		home = os.TempDir()
 	}
-	return filepath.Join(home, ".cache", "mcp-flowsentinel", "domrep.json")
-}()
+	domRepCachePath = filepath.Join(home, ".cache", "mcp-flowsentinel", "domrep.json")
+	loadDomRepFromDisk()
+}
 
 // DomRepLookup checks whether domain (or its immediate parent) is blocklisted.
 // Returns the label and true on a match; empty string and false otherwise.
@@ -264,7 +267,8 @@ func loadDomRepFromDisk() {
 	domRepMu.Lock()
 	domRepLive = &domRepState{domains: domains}
 	domRepMu.Unlock()
-	log.Printf("domrep: loaded %d domains from disk cache", len(domains))
+	log.Printf("domrep: restored %d domains from disk cache (updated %s ago)",
+		len(domains), time.Since(domRepLastUpdated()).Round(time.Minute))
 }
 
 // domRepLastUpdated returns the modification time of the cache file, or zero.
