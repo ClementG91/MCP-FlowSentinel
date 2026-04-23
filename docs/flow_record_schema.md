@@ -56,6 +56,7 @@ Populated when the packet's four-tuple matches a socket in the local OS socket t
 | `tls_sni` | string | Server Name Indication from TLS ClientHello |
 | `dns_queries` | string[] | Unique DNS question names observed for this flow |
 | `ip_rep_label` | string | Blocklist label when the destination IP matches an IP reputation feed (e.g. `"feodo: C2 server"`, `"et: known attacker"`). Omitted when the IP is clean. |
+| `dom_rep_label` | string | Feed label when a DNS query or TLS SNI matches a known-bad domain (e.g. `"urlhaus"`, `"threatfox"`). Omitted when no match. |
 
 ---
 
@@ -175,6 +176,9 @@ See `internal/aggregate/aggregate.go` for the authoritative list.
 
 | Signal | Score | Bucket | Notes |
 |---|---|---|---|
+| Domain reputation hit (URLhaus / ThreatFox) | +2.0 | dns | `dom_rep_label` is set — DNS query or TLS SNI matched a known-bad domain |
+| Slow-and-low C2 recurrence (≥ 3 windows) | +0.5–2.0 | behavioral | Same flow key observed in multiple 5-min capture windows: 3–4=+0.5, 5–9=+1.0, 10–19=+1.5, ≥20=+2.0 |
+| First-seen destination for process | +1.5 | behavioral | Process contacts an IP it has never been seen connecting to (confident after 5+ total connections) |
 | Known-bad JA3 (client) | +4.0 | c2 | `ja3_known_bad` is set |
 | Known-bad port (4444, 1337, 31337, 6666–6669…) | +4.0 | c2 | Metasploit defaults, back-connect shells |
 | Known-bad JA3S (server) | +3.5 | c2 | `ja3s_known_bad` is set |
@@ -228,6 +232,14 @@ In daemon mode, each `(process_name, dst_port)` pair accumulates byte-count stat
 | ≥ 3σ | 1.8× |
 
 The multiplier is applied per-flow; the result is hard-capped at 10.0.
+
+### Destination tracking
+
+Per process, MCP-FlowSentinel maintains the set of destination IPs it has ever contacted (bounded at 2 000 entries per process). The first connection to a new IP fires a **+1.5 behavioral** signal. Cold-start protection: signal is suppressed until the process has accumulated ≥ 5 total outbound connections.
+
+### Expected-beaconer suppression
+
+After a process triggers a beaconing signal ≥ 10 times, MCP-FlowSentinel classifies it as an expected beaconer and suppresses beaconing scoring for that process. This prevents false-positive fatigue for legitimate periodic processes (monitoring agents, NTP clients, chat apps). Suppression is per-process-name, case-insensitive, and persists across restarts via `baseline.json`.
 
 ---
 

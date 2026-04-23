@@ -263,7 +263,9 @@ After bucket totals are summed, a **baseline anomaly multiplier** scales the raw
 
 ### Baseline learning
 
-In daemon mode, MCP-FlowSentinel continuously learns the normal behaviour of each `(process, destination port)` pair using [Welford's online algorithm](https://en.wikipedia.org/wiki/Algorithms_for_calculating_variance#Welford's_online_algorithm). After 5+ observations, flows that deviate significantly from the process's historical byte volume are scored higher:
+In daemon mode, MCP-FlowSentinel continuously learns the normal behaviour of each process using several online models. Baseline state persists across restarts at `~/.cache/mcp-flowsentinel/baseline.json` (XDG_CACHE_HOME respected). Entries older than 72 hours are pruned automatically.
+
+**Byte-volume anomaly (Welford online algorithm):** Each `(process, destination port)` pair tracks rolling mean and variance. Flows that deviate significantly from the process's historical byte volume are scored higher via a multiplier:
 
 | Deviation from baseline | Multiplier |
 |------------------------|------------|
@@ -273,7 +275,9 @@ In daemon mode, MCP-FlowSentinel continuously learns the normal behaviour of eac
 | 2–3σ | 1.3× (elevated) |
 | ≥ 3σ | 1.8× (anomalous) |
 
-Baseline state persists across restarts at `~/.cache/mcp-flowsentinel/baseline.json` (XDG_CACHE_HOME respected). Entries older than 72 hours are pruned automatically.
+**New destination tracking:** Per process, MCP-FlowSentinel records the set of destination IPs it has contacted (bounded at 2000 entries). The first time a process connects to an IP it has never been seen contacting, a +1.5 behavioral signal fires — but only after the process has accumulated 5+ total connections (cold-start protection).
+
+**Expected-beaconer suppression:** Legitimate processes (NTP clients, monitoring agents, chat apps) produce periodic connections that look like C2 beaconing. After a process triggers the beaconing signal 10+ times, MCP-FlowSentinel classifies it as an expected beaconer and suppresses the signal to avoid false-positive fatigue. Suppression is per-process-name and case-insensitive.
 
 ### Process context masking
 
@@ -328,6 +332,9 @@ MCP-FlowSentinel classifies the process making a connection and suppresses signa
 | Missing TLS SNI on port 443 (> 3 pkts) | +0.7 | network | Stealthy TLS client |
 | Non-standard port (< 49152, not in standard list) | +1.0 | network | Low-noise signal |
 | IPv6 fragmentation | +0.5 | network | Potential JA3 evasion via fragmentation |
+| **Domain reputation hit (URLhaus / ThreatFox)** | **+2.0** | dns | DNS query or TLS SNI matched a known-bad domain |
+| **Slow-and-low C2 (≥ 3 capture windows)** | **+0.5–2.0** | behavioral | Same flow key recurs across multiple 5-min windows: 3–4=+0.5, 5–9=+1.0, 10–19=+1.5, ≥20=+2.0 |
+| **First-seen destination for process** | **+1.5** | behavioral | Process connects to an IP it has never contacted before (confident after 5+ total connections) |
 
 All signals can be individually disabled via `disable_*_scoring` config flags. Low-scoring flows include a `clean_signals` array explaining why they look benign (standard port, resolved hostname, country, TLS SNI).
 
@@ -586,6 +593,15 @@ ip_rep:
     - https://rules.emergingthreats.net/fwrules/emerging-Block-IPs.txt
   local_file: ""                        # path to a local IP/CIDR list
 
+# ─── Domain Reputation (optional, URLhaus + ThreatFox by default) ────────
+dom_rep:
+  enabled: false                        # set to true to activate domain reputation lookups
+  update_interval_hours: 24
+  urls:
+    - https://urlhaus.abuse.ch/downloads/text/
+    - https://threatfox.abuse.ch/export/csv/domains/recent/
+  local_file: ""                        # path to a local domain list (one domain per line)
+
 # ─── Prometheus metrics (optional) ───────────────────────────────────────
 metrics:
   enabled: false
@@ -716,13 +732,14 @@ internal/
   correlate/  correlate.go          Maps socket 4-tuples → processes (gopsutil)
   aggregate/  aggregate.go          Flow aggregation, categorical bounded scoring, process context, baseline multiplier
               filter.go             min_score / top_n filtering
-  baseline/   baseline.go           Welford online stats per (process, port); anomaly multiplier; JSON persistence
+  baseline/   baseline.go           Welford online stats per (process, port); anomaly multiplier; destination tracking; beaconing suppression; JSON persistence
   intel/      intel.go              GeoIP + high-risk ASN enrichment (MaxMind GeoLite2)
               iprep.go              IP reputation: exact-IP map + CIDR range scan; Feodo Tracker + ET feeds
+              domrep.go             Domain reputation: URLhaus + ThreatFox feeds; exact + parent-domain match; disk-cached
               mitre.go              MITRE ATT&CK technique mapping
   ja3/        ja3.go                JA3 TLS client fingerprinting + known-bad hash lookup
               ja3s.go               JA3S TLS server fingerprinting + known-bad C2 server lookup
-  history/    history.go            Rolling JSONL persistence + gzip daily rotation
+  history/    history.go            Rolling JSONL persistence + gzip daily rotation + RecurrenceMap for cross-window correlation
   alerting/   alerting.go           Webhook notifications with deduplication + HMAC signing
               store.go              Persistent alert log (JSONL) + GetAlerts query
   daemon/     daemon.go             Continuous background capture loop; baseline init; feed updater goroutines
@@ -763,9 +780,13 @@ Packet stream (libpcap)
   → aggregate.Finalize
       ↳ Pass 1: build base FlowRecords
       ↳ Pass 2: parallel reverse-DNS           (configurable workers, LRU cache)
-      ↳ Pass 2.5: GeoIP + JA3/JA3S/HASSH + IP reputation enrichment
+      ↳ Pass 2.5: GeoIP + JA3/JA3S/HASSH + IP reputation + domain reputation enrichment
       ↳ Pass 3: categorical bounded scoring (6 buckets, hard cap 10.0)
                 + baseline anomaly multiplier (Welford online stats)
+                + cross-window recurrence (slow-and-low C2, behavioral +0.5–2.0)
+                + new-destination anomaly (behavioral +1.5)
+                + domain reputation (+2.0 dns)
+                + expected-beaconer suppression (per-process learning)
                 + process context masking (browser/system/devtool)
                 + MITRE mapping + clean signals
       ↳ Pass 4: cross-flow scan detection
