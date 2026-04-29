@@ -1,6 +1,7 @@
 package intel
 
 import (
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -172,7 +173,31 @@ func TestUpdateDomRep_HTTPError(t *testing.T) {
 
 	err := UpdateDomRep([]string{srv.URL}, "")
 	if err == nil {
-		t.Fatal("expected error for HTTP 403")
+		t.Fatal("expected error when all sources fail (HTTP 403)")
+	}
+	resetDomRep()
+}
+
+func TestUpdateDomRep_PartialFailure_StillSucceeds(t *testing.T) {
+	// One URL returns 500, another succeeds — overall update should succeed.
+	resetDomRep()
+	bad := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer bad.Close()
+
+	good := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/plain")
+		fmt.Fprintln(w, "evil.example.com")
+	}))
+	defer good.Close()
+
+	err := UpdateDomRep([]string{bad.URL, good.URL}, "")
+	if err != nil {
+		t.Fatalf("expected success when at least one source succeeds, got: %v", err)
+	}
+	if DomRepSize() == 0 {
+		t.Error("expected at least one domain loaded from the good source")
 	}
 	resetDomRep()
 }

@@ -79,18 +79,36 @@ func DomRepSize() int {
 }
 
 // UpdateDomRep fetches the given URLs (and optional localFile) and atomically
-// replaces the live domain reputation database.
+// replaces the live domain reputation database. Individual URL failures are
+// logged and skipped rather than aborting the whole update, matching the
+// resilience behaviour of UpdateIPRep.
 func UpdateDomRep(urls []string, localFile string) error {
 	domains := make(map[string]domRepEntry)
 
-	for _, u := range urls {
-		resp, err := http.Get(u) //nolint:gosec
+	if localFile != "" {
+		f, err := os.Open(localFile)
 		if err != nil {
-			return fmt.Errorf("domrep: fetch %s: %w", u, err)
+			log.Printf("domrep: local file %q: %v", localFile, err)
+		} else {
+			parseDomRepText(f, "local", domains)
+			f.Close()
+		}
+	}
+
+	client := &http.Client{Timeout: 30 * time.Second}
+	var lastErr error
+	for _, u := range urls {
+		resp, err := client.Get(u) //nolint:noctx
+		if err != nil {
+			log.Printf("domrep: fetch %q: %v", u, err)
+			lastErr = err
+			continue
 		}
 		if resp.StatusCode != http.StatusOK {
 			resp.Body.Close()
-			return fmt.Errorf("domrep: fetch %s: HTTP %d", u, resp.StatusCode)
+			log.Printf("domrep: fetch %q: HTTP %d", u, resp.StatusCode)
+			lastErr = fmt.Errorf("HTTP %d", resp.StatusCode)
+			continue
 		}
 		src := domRepSourceLabel(u)
 		if strings.Contains(strings.ToLower(u), "threatfox") {
@@ -101,16 +119,10 @@ func UpdateDomRep(urls []string, localFile string) error {
 		resp.Body.Close()
 	}
 
-	if localFile != "" {
-		f, err := os.Open(localFile)
-		if err != nil {
-			return fmt.Errorf("domrep: open local file: %w", err)
-		}
-		parseDomRepText(f, "local", domains)
-		f.Close()
-	}
-
 	if len(domains) == 0 {
+		if lastErr != nil {
+			return fmt.Errorf("domrep: all sources failed, last error: %w", lastErr)
+		}
 		return fmt.Errorf("domrep: no entries parsed from sources")
 	}
 
