@@ -2,10 +2,13 @@ package metrics
 
 import (
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 )
 
 func TestHandleMetrics_ContainsExpectedKeys(t *testing.T) {
@@ -94,4 +97,52 @@ func TestHandleMetrics_ContentType(t *testing.T) {
 	if !strings.HasPrefix(ct, "text/plain") {
 		t.Errorf("expected text/plain content-type, got %q", ct)
 	}
+}
+
+func TestRecordAlert_Increments(t *testing.T) {
+	alertsFiredTotal.Store(0)
+	RecordAlert()
+	RecordAlert()
+	if alertsFiredTotal.Load() != 2 {
+		t.Errorf("alertsFiredTotal = %d, want 2", alertsFiredTotal.Load())
+	}
+}
+
+func TestRecordWebhookFailure_Increments(t *testing.T) {
+	webhookFailures.Store(0)
+	RecordWebhookFailure()
+	if webhookFailures.Load() != 1 {
+		t.Errorf("webhookFailures = %d, want 1", webhookFailures.Load())
+	}
+}
+
+func TestServe_StartsAndResponds(t *testing.T) {
+	// Reserve a free port, then release it so Serve() can bind to it.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("net.Listen: %v", err)
+	}
+	addr := ln.Addr().String()
+	ln.Close()
+
+	// Reset the sync.Once so Serve() will actually start (package-level white-box).
+	serverOnce = sync.Once{}
+	Serve(addr)
+
+	// Poll /healthz until the server is ready (max 2 s).
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		resp, err := http.Get("http://" + addr + "/healthz") //nolint:gosec
+		if err != nil {
+			time.Sleep(10 * time.Millisecond)
+			continue
+		}
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK || string(body) != "ok" {
+			t.Fatalf("healthz: status=%d body=%q", resp.StatusCode, body)
+		}
+		return // success
+	}
+	t.Fatal("metrics server did not become ready within 2s")
 }

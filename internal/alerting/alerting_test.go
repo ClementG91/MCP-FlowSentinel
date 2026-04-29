@@ -623,3 +623,81 @@ func TestFire_EnvVarWebhook_Overrides(t *testing.T) {
 		t.Fatal("webhook not called via env var override within 3s")
 	}
 }
+
+func TestAlertLogPath_NonEmpty(t *testing.T) {
+	p := AlertLogPath()
+	if p == "" {
+		t.Error("AlertLogPath() returned empty string")
+	}
+}
+
+func TestFireTest_Success(t *testing.T) {
+	received := make(chan []byte, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		received <- body
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	original := config.Get()
+	defer config.Set(original)
+
+	cfg := config.Default()
+	cfg.Alerting.WebhookURL = srv.URL
+	config.Set(cfg)
+
+	err := FireTest(highFlow(9.0))
+	if err != nil {
+		t.Fatalf("FireTest returned error: %v", err)
+	}
+
+	select {
+	case body := <-received:
+		var payload map[string]any
+		if err := json.Unmarshal(body, &payload); err != nil {
+			t.Fatalf("response body is not valid JSON: %v", err)
+		}
+		if payload["severity"] != "TEST" {
+			t.Errorf("severity = %v, want \"TEST\"", payload["severity"])
+		}
+		if payload["source"] != "mcp-flowsentinel/test" {
+			t.Errorf("source = %v, want \"mcp-flowsentinel/test\"", payload["source"])
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("webhook not called within 3s")
+	}
+}
+
+func TestFireTest_NoURL_ReturnsError(t *testing.T) {
+	original := config.Get()
+	defer config.Set(original)
+
+	cfg := config.Default()
+	cfg.Alerting.WebhookURL = ""
+	config.Set(cfg)
+
+	err := FireTest(highFlow(9.0))
+	if err == nil {
+		t.Error("expected error when no webhook URL configured")
+	}
+}
+
+func TestFireTest_BadStatus_ReturnsError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	original := config.Get()
+	defer config.Set(original)
+
+	cfg := config.Default()
+	cfg.Alerting.WebhookURL = srv.URL
+	config.Set(cfg)
+
+	err := FireTest(highFlow(9.0))
+	if err == nil {
+		t.Error("expected error on non-2xx response")
+	}
+}
