@@ -1251,3 +1251,80 @@ func TestLiveWatchHandler_InvalidInterface_ReturnsError(t *testing.T) {
 		t.Errorf("expected invalid interface error, got: %s", text)
 	}
 }
+
+func TestLiveWatchHandler_InterfaceTooLong_ReturnsError(t *testing.T) {
+	req := mcp.CallToolRequest{}
+	req.Params.Arguments = map[string]any{
+		"interface":    strings.Repeat("a", 257),
+		"process_name": "test",
+	}
+	result, _ := liveWatchHandler(context.Background(), req)
+	text := resultText(t, result)
+	if !strings.Contains(text, "invalid interface") {
+		t.Errorf("expected invalid interface error for too-long name, got: %s", text)
+	}
+}
+
+// ─── vtLookup (thin wrapper) ──────────────────────────────────────────────────
+
+func TestVtLookup_UsesBaseURL(t *testing.T) {
+	// Exercise the vtLookup wrapper (not just vtLookupWithURL) by overriding
+	// vtBaseURL so it points at a local httptest server.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"data":{"attributes":{"last_analysis_stats":{"malicious":1,"suspicious":0,"undetected":5,"harmless":0}},"links":{"self":"http://example.com/vt"}}}`)
+	}))
+	defer srv.Close()
+
+	orig := vtBaseURL
+	vtBaseURL = srv.URL + "/"
+	defer func() { vtBaseURL = orig }()
+
+	det, total, _, err := vtLookup("deadbeef", "fake-key")
+	if err != nil {
+		t.Fatalf("vtLookup: %v", err)
+	}
+	if det != 1 {
+		t.Errorf("detections = %d, want 1", det)
+	}
+	if total != 6 {
+		t.Errorf("total = %d, want 6", total)
+	}
+}
+
+// TestBuildScanReport_WithVTKey verifies that buildScanReport calls vtLookup
+// when both a VT API key and a valid SHA256 are available.
+func TestBuildScanReport_WithVTKey(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"data":{"attributes":{"last_analysis_stats":{"malicious":2,"suspicious":0,"undetected":10,"harmless":0}},"links":{"self":"http://example.com/vt/abc"}}}`)
+	}))
+	defer srv.Close()
+
+	orig := vtBaseURL
+	vtBaseURL = srv.URL + "/"
+	defer func() { vtBaseURL = orig }()
+
+	procs, err := process.Processes()
+	if err != nil || len(procs) == 0 {
+		t.Skip("cannot list processes")
+	}
+	// Pick the current process — we know it exists and is readable.
+	pid := int32(os.Getpid())
+	var target *process.Process
+	for _, p := range procs {
+		if p.Pid == pid {
+			target = p
+			break
+		}
+	}
+	if target == nil {
+		t.Skip("current process not in list")
+	}
+
+	r := buildScanReport(target, "fake-vt-key")
+	// VT detections should have been populated (mock returns malicious=2).
+	if r.VTDetections == 0 && r.VTLookupError == "" {
+		t.Error("expected VTDetections > 0 or VTLookupError set when vtKey is provided")
+	}
+}

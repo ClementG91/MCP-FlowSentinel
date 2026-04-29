@@ -233,10 +233,14 @@ type vtResponse struct {
 	} `json:"data"`
 }
 
+// vtBaseURL is the VirusTotal v3 files endpoint. Override in tests to point
+// at a local httptest server.
+var vtBaseURL = "https://www.virustotal.com/api/v3/files/"
+
 // vtLookup queries VirusTotal v3 for a SHA256 hash.
 // Returns (malicious+suspicious detections, total engines, permalink, error).
 func vtLookup(sha256hash, apiKey string) (detections, total int, permalink string, err error) {
-	return vtLookupWithURL("https://www.virustotal.com/api/v3/files/", sha256hash, apiKey)
+	return vtLookupWithURL(vtBaseURL, sha256hash, apiKey)
 }
 
 // vtLookupWithURL is the testable core of vtLookup; baseURL allows tests to

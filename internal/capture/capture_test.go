@@ -1093,3 +1093,131 @@ func TestHasshSourceLabel(t *testing.T) {
 		})
 	}
 }
+
+// ─── parsePacket enrichment paths ────────────────────────────────────────────
+
+// buildIPv4UDPPacketWithPayload builds a UDP packet carrying arbitrary payload bytes.
+func buildIPv4UDPPacketWithPayload(t *testing.T, srcIP, dstIP string, srcPort, dstPort uint16, payload []byte) gopacket.Packet {
+	t.Helper()
+	eth := &layers.Ethernet{
+		SrcMAC:       net.HardwareAddr{0, 0, 0, 0, 0, 0},
+		DstMAC:       net.HardwareAddr{0, 0, 0, 0, 0, 0},
+		EthernetType: layers.EthernetTypeIPv4,
+	}
+	ip4 := &layers.IPv4{
+		Version:  4,
+		TTL:      64,
+		Protocol: layers.IPProtocolUDP,
+		SrcIP:    net.ParseIP(srcIP).To4(),
+		DstIP:    net.ParseIP(dstIP).To4(),
+	}
+	udp := &layers.UDP{SrcPort: layers.UDPPort(srcPort), DstPort: layers.UDPPort(dstPort)}
+	if err := udp.SetNetworkLayerForChecksum(ip4); err != nil {
+		t.Fatalf("SetNetworkLayerForChecksum: %v", err)
+	}
+	buf := gopacket.NewSerializeBuffer()
+	opts := gopacket.SerializeOptions{FixLengths: true, ComputeChecksums: true}
+	if err := gopacket.SerializeLayers(buf, opts, eth, ip4, udp, gopacket.Payload(payload)); err != nil {
+		t.Fatalf("SerializeLayers: %v", err)
+	}
+	return gopacket.NewPacket(buf.Bytes(), layers.LayerTypeEthernet, gopacket.Default)
+}
+
+// TestParsePacket_UDP443_QUIC verifies the QUIC-initial detection path in
+// parsePacket when the UDP destination port is 443 and the payload starts with
+// a QUIC v1 long header.
+func TestParsePacket_UDP443_QUIC(t *testing.T) {
+	quicPayload := []byte{0xC0, 0x00, 0x00, 0x00, 0x01, 0xFF, 0xEE}
+	pkt := buildIPv4UDPPacketWithPayload(t, "10.0.0.1", "10.0.0.2", 54321, 443, quicPayload)
+	ev := parsePacket(pkt)
+	if ev == nil {
+		t.Fatal("expected non-nil event for UDP/443 QUIC")
+	}
+	if !ev.IsQUIC {
+		t.Error("expected IsQUIC=true for QUIC initial header on UDP/443")
+	}
+}
+
+// TestParsePacket_UDP443_NotQUIC confirms that a non-QUIC UDP/443 payload sets
+// IsQUIC=false (exercises the tcpPayload assignment for UDP/443 without a QUIC header).
+func TestParsePacket_UDP443_NotQUIC(t *testing.T) {
+	payload := []byte{0x01, 0x02, 0x03, 0x04, 0x05, 0x06}
+	pkt := buildIPv4UDPPacketWithPayload(t, "10.0.0.1", "10.0.0.2", 54321, 443, payload)
+	ev := parsePacket(pkt)
+	if ev == nil {
+		t.Fatal("expected non-nil event")
+	}
+	if ev.IsQUIC {
+		t.Error("expected IsQUIC=false for non-QUIC payload on UDP/443")
+	}
+}
+
+// TestParsePacket_TCP443_ServerSide exercises the JA3S + cert extraction branch
+// (srcPort == 443) in parsePacket.
+func TestParsePacket_TCP443_ServerSide(t *testing.T) {
+	// Any non-empty payload triggers the srcPort==443 path.
+	pkt := buildIPv4TCPPacket(t, "10.0.0.2", "10.0.0.1", 443, 54321, []byte{0x16, 0x03, 0x03, 0x00, 0x00})
+	ev := parsePacket(pkt)
+	if ev == nil {
+		t.Fatal("expected non-nil event")
+	}
+	// Just verify the port was parsed correctly — the enrichment functions are
+	// separately tested; here we only confirm the branch runs without panic.
+	if ev.SrcPort != 443 {
+		t.Errorf("SrcPort = %d, want 443", ev.SrcPort)
+	}
+}
+
+// TestParsePacket_TCP8443_ServerSide covers the srcPort==8443 variant.
+func TestParsePacket_TCP8443_ServerSide(t *testing.T) {
+	pkt := buildIPv4TCPPacket(t, "10.0.0.2", "10.0.0.1", 8443, 54321, []byte{0x16, 0x03, 0x03, 0x00, 0x00})
+	ev := parsePacket(pkt)
+	if ev == nil {
+		t.Fatal("expected non-nil event")
+	}
+	if ev.SrcPort != 8443 {
+		t.Errorf("SrcPort = %d, want 8443", ev.SrcPort)
+	}
+}
+
+// TestParsePacket_TCP22_SSH exercises the SSH HASSH extraction branch (dstPort==22).
+func TestParsePacket_TCP22_SSH(t *testing.T) {
+	// Any non-empty non-TLS payload on dstPort 22 enters the HASSH path.
+	pkt := buildIPv4TCPPacket(t, "10.0.0.1", "10.0.0.2", 54321, 22, []byte{0x53, 0x53, 0x48})
+	ev := parsePacket(pkt)
+	if ev == nil {
+		t.Fatal("expected non-nil event")
+	}
+	if ev.DstPort != 22 {
+		t.Errorf("DstPort = %d, want 22", ev.DstPort)
+	}
+}
+
+// TestParsePacket_HTTP2Preface exercises the IsHTTP2Preface detection path.
+func TestParsePacket_HTTP2Preface(t *testing.T) {
+	preface := []byte("PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n") // exactly 24 bytes
+	pkt := buildIPv4TCPPacket(t, "10.0.0.1", "10.0.0.2", 54321, 443, preface)
+	ev := parsePacket(pkt)
+	if ev == nil {
+		t.Fatal("expected non-nil event")
+	}
+	if !ev.IsHTTP2 {
+		t.Error("expected IsHTTP2=true for HTTP/2 preface payload")
+	}
+}
+
+// TestParsePacket_HTTP1_GET exercises the HTTP/1.1 extraction path (non-TLS payload).
+func TestParsePacket_HTTP1_GET(t *testing.T) {
+	req := []byte("GET /index.html HTTP/1.1\r\nHost: example.com\r\n\r\n")
+	pkt := buildIPv4TCPPacket(t, "10.0.0.1", "10.0.0.2", 54321, 80, req)
+	ev := parsePacket(pkt)
+	if ev == nil {
+		t.Fatal("expected non-nil event")
+	}
+	if ev.HTTPMethod != "GET" {
+		t.Errorf("HTTPMethod = %q, want GET", ev.HTTPMethod)
+	}
+	if ev.HTTPHost != "example.com" {
+		t.Errorf("HTTPHost = %q, want example.com", ev.HTTPHost)
+	}
+}
