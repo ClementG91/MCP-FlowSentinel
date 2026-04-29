@@ -236,8 +236,13 @@ type vtResponse struct {
 // vtLookup queries VirusTotal v3 for a SHA256 hash.
 // Returns (malicious+suspicious detections, total engines, permalink, error).
 func vtLookup(sha256hash, apiKey string) (detections, total int, permalink string, err error) {
-	url := "https://www.virustotal.com/api/v3/files/" + sha256hash
-	req, err := http.NewRequest("GET", url, nil)
+	return vtLookupWithURL("https://www.virustotal.com/api/v3/files/", sha256hash, apiKey)
+}
+
+// vtLookupWithURL is the testable core of vtLookup; baseURL allows tests to
+// point at a local httptest server instead of the real VirusTotal endpoint.
+func vtLookupWithURL(baseURL, sha256hash, apiKey string) (detections, total int, permalink string, err error) {
+	req, err := http.NewRequest("GET", baseURL+sha256hash, nil)
 	if err != nil {
 		return 0, 0, "", fmt.Errorf("vtLookup: build request: %w", err)
 	}

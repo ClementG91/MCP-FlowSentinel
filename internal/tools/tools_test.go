@@ -4,7 +4,10 @@ import (
 	"context"
 	"encoding/binary"
 	"encoding/json"
+	"fmt"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -1033,6 +1036,111 @@ func TestDeriveSuspiciousSignals_CleanBinary_NoSignals(t *testing.T) {
 	signals := deriveSuspiciousSignals(r)
 	if len(signals) != 0 {
 		t.Errorf("expected no suspicious signals for clean binary, got: %v", signals)
+	}
+}
+
+func TestDeriveSuspiciousSignals_SHA256Error(t *testing.T) {
+	r := scanReport{
+		BinaryPath:  "/usr/bin/python3",
+		SHA256Error: "permission denied",
+	}
+	signals := deriveSuspiciousSignals(r)
+	found := false
+	for _, s := range signals {
+		if strings.Contains(s, "hash_unavailable") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected hash_unavailable signal, got: %v", signals)
+	}
+}
+
+func TestDeriveSuspiciousSignals_SuspiciousModule(t *testing.T) {
+	r := scanReport{
+		BinaryPath:    "/usr/bin/python3",
+		SHA256:        "abc123",
+		LoadedModules: []string{"/tmp/injected.so", "/usr/lib/libc.so.6"},
+	}
+	signals := deriveSuspiciousSignals(r)
+	found := false
+	for _, s := range signals {
+		if strings.Contains(s, "suspicious_module") && strings.Contains(s, "injected.so") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected suspicious_module signal for /tmp/injected.so, got: %v", signals)
+	}
+	// /usr/lib/libc.so.6 should NOT produce a signal.
+	for _, s := range signals {
+		if strings.Contains(s, "libc.so.6") {
+			t.Errorf("unexpected signal for system module: %s", s)
+		}
+	}
+}
+
+// ─── vtLookup ─────────────────────────────────────────────────────────────────
+
+func TestVtLookup_Success(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{
+			"data": {
+				"attributes": {
+					"last_analysis_stats": {
+						"malicious": 3, "suspicious": 1, "undetected": 60, "harmless": 6
+					}
+				},
+				"links": {"self": "https://www.virustotal.com/gui/file/abc123"}
+			}
+		}`)
+	}))
+	defer srv.Close()
+
+	// Patch vtLookup to use the test server URL.
+	origURL := "https://www.virustotal.com/api/v3/files/"
+	_ = origURL // suppress "unused" if vtLookup uses a hardcoded const
+
+	det, total, link, err := vtLookupWithURL(srv.URL+"/", "abc123def", "fake-api-key")
+	if err != nil {
+		t.Fatalf("vtLookupWithURL: %v", err)
+	}
+	if det != 4 { // malicious(3) + suspicious(1)
+		t.Errorf("detections = %d, want 4", det)
+	}
+	if total != 70 { // 3+1+60+6
+		t.Errorf("total = %d, want 70", total)
+	}
+	if link == "" {
+		t.Error("expected non-empty permalink")
+	}
+}
+
+func TestVtLookup_NotFound(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	det, total, link, err := vtLookupWithURL(srv.URL+"/", "unknown", "fake-key")
+	if err != nil {
+		t.Fatalf("expected no error on 404, got: %v", err)
+	}
+	if det != 0 || total != 0 || link != "" {
+		t.Errorf("expected zero values on 404, got det=%d total=%d link=%q", det, total, link)
+	}
+}
+
+func TestVtLookup_ServerError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	_, _, _, err := vtLookupWithURL(srv.URL+"/", "abc123", "fake-key")
+	if err == nil {
+		t.Error("expected error on 500 response")
 	}
 }
 
