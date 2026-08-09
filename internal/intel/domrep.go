@@ -279,15 +279,4 @@ func loadDomRepFromDisk() {
 	domRepMu.Lock()
 	domRepLive = &domRepState{domains: domains}
 	domRepMu.Unlock()
-	log.Printf("domrep: restored %d domains from disk cache (updated %s ago)",
-		len(domains), time.Since(domRepLastUpdated()).Round(time.Minute))
-}
-
-// domRepLastUpdated returns the modification time of the cache file, or zero.
-func domRepLastUpdated() time.Time {
-	fi, err := os.Stat(domRepCachePath)
-	if err != nil {
-		return time.Time{}
-	}
-	return fi.ModTime()
 }

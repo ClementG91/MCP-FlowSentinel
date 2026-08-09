@@ -22,7 +22,10 @@ import (
 	"github.com/ClementG91/MCP-FlowSentinel/internal/config"
 )
 
-const pruneEvery = 5 // run pruneOld after every N appends
+const (
+	pruneEvery         = 5        // run pruneOld after every N appends
+	maxHistoryLineSize = 64 << 20 // bound memory use and keep JSONL scanners readable
+)
 
 // currentSchemaVersion is incremented whenever the Entry or FlowRecord schema
 // changes in a backward-incompatible way. Readers treat v=0 (missing field) as
@@ -79,11 +82,11 @@ func init() {
 
 // Append persists a batch of flows to the history file.
 // source is a human-readable label such as "live:eth0" or "pcap:/tmp/cap.pcap".
-// Errors are silently swallowed — history is best-effort and must never break
-// the main capture pipeline.
-func Append(source string, flows []aggregate.FlowRecord) {
+// Persistence remains best-effort for callers, but errors are returned so the
+// capture pipeline can report data loss instead of silently claiming success.
+func Append(source string, flows []aggregate.FlowRecord) error {
 	if len(flows) == 0 {
-		return
+		return nil
 	}
 
 	entry := Entry{
@@ -96,27 +99,39 @@ func Append(source string, flows []aggregate.FlowRecord) {
 
 	data, err := json.Marshal(entry)
 	if err != nil {
-		return
+		return fmt.Errorf("marshal history entry: %w", err)
+	}
+	if len(data) > maxHistoryLineSize {
+		return fmt.Errorf("history entry is %d bytes, limit is %d", len(data), maxHistoryLineSize)
 	}
 
 	mu.Lock()
+	defer mu.Unlock()
 	f, err := os.OpenFile(histPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
 	if err != nil {
-		mu.Unlock()
-		return
+		return fmt.Errorf("open history: %w", err)
 	}
 	// Record the offset of the new line before writing.
-	offset, _ := f.Seek(0, 2) // seek to end = current file size
-	f.WriteString(string(data) + "\n")
-	f.Close()
+	offset, err := f.Seek(0, 2) // seek to end = current file size
+	if err != nil {
+		_ = f.Close()
+		return fmt.Errorf("seek history: %w", err)
+	}
+	if _, err := f.Write(append(data, '\n')); err != nil {
+		_ = f.Close()
+		return fmt.Errorf("append history: %w", err)
+	}
+	if err := f.Close(); err != nil {
+		return fmt.Errorf("close history: %w", err)
+	}
 	// Append to in-memory index (always sorted: new entries have the latest ts).
 	offsetIndex = append(offsetIndex, indexEntry{ts: entry.Timestamp, offset: offset})
-	mu.Unlock()
 
 	// Prune old entries periodically to prevent unbounded file growth.
 	if atomic.AddInt64(&appendCount, 1)%pruneEvery == 0 {
 		go pruneOld()
 	}
+	return nil
 }
 
 // Query reads the history file and returns entries that match opts.
@@ -136,6 +151,16 @@ func Query(opts QueryOpts) ([]Entry, error) {
 
 	f, err := os.Open(histPath)
 	if os.IsNotExist(err) {
+		if config.Get().History.CompressRotated {
+			results, queryErr := queryCompressedFiles(cutoff, opts)
+			if queryErr != nil {
+				return nil, queryErr
+			}
+			sort.Slice(results, func(i, j int) bool {
+				return results[i].Timestamp.Before(results[j].Timestamp)
+			})
+			return results, nil
+		}
 		return nil, nil
 	}
 	if err != nil {
@@ -167,11 +192,13 @@ func Query(opts QueryOpts) ([]Entry, error) {
 		}
 	}
 	// Always seek explicitly: buildIndex leaves the cursor at EOF.
-	f.Seek(startOffset, 0)
+	if _, err := f.Seek(startOffset, 0); err != nil {
+		return nil, fmt.Errorf("seek history query: %w", err)
+	}
 
 	var results []Entry
 	scanner := bufio.NewScanner(f)
-	scanner.Buffer(make([]byte, 4*1024*1024), 4*1024*1024)
+	scanner.Buffer(make([]byte, 64*1024), maxHistoryLineSize)
 
 	for scanner.Scan() {
 		var entry Entry
@@ -196,7 +223,10 @@ func Query(opts QueryOpts) ([]Entry, error) {
 
 	// Also search rotated daily gzip files when the window spans multiple days.
 	if config.Get().History.CompressRotated {
-		compressed := queryCompressedFiles(cutoff, opts)
+		compressed, err := queryCompressedFiles(cutoff, opts)
+		if err != nil {
+			return results, err
+		}
 		results = append(results, compressed...)
 		sort.Slice(results, func(i, j int) bool {
 			return results[i].Timestamp.Before(results[j].Timestamp)
@@ -208,11 +238,11 @@ func Query(opts QueryOpts) ([]Entry, error) {
 
 // queryCompressedFiles scans rotated history_YYYY-MM-DD.jsonl.gz files for
 // entries matching opts. Must be called with mu held.
-func queryCompressedFiles(cutoff time.Time, opts QueryOpts) []Entry {
+func queryCompressedFiles(cutoff time.Time, opts QueryOpts) ([]Entry, error) {
 	dir := filepath.Dir(histPath)
 	dirEntries, err := os.ReadDir(dir)
 	if err != nil {
-		return nil
+		return nil, fmt.Errorf("read rotated history directory: %w", err)
 	}
 
 	var results []Entry
@@ -238,15 +268,15 @@ func queryCompressedFiles(cutoff time.Time, opts QueryOpts) []Entry {
 
 		f, err := os.Open(filepath.Join(dir, name))
 		if err != nil {
-			continue
+			return results, fmt.Errorf("open rotated history %s: %w", name, err)
 		}
 		gr, err := gzip.NewReader(f)
 		if err != nil {
-			f.Close()
-			continue
+			_ = f.Close()
+			return results, fmt.Errorf("open rotated history %s: %w", name, err)
 		}
 		scanner := bufio.NewScanner(gr)
-		scanner.Buffer(make([]byte, 4*1024*1024), 4*1024*1024)
+		scanner.Buffer(make([]byte, 64*1024), maxHistoryLineSize)
 		for scanner.Scan() {
 			var entry Entry
 			if err := json.Unmarshal(scanner.Bytes(), &entry); err != nil {
@@ -263,10 +293,20 @@ func queryCompressedFiles(cutoff time.Time, opts QueryOpts) []Entry {
 			entry.FlowCount = len(filtered)
 			results = append(results, entry)
 		}
-		gr.Close()
-		f.Close()
+		if err := scanner.Err(); err != nil {
+			_ = gr.Close()
+			_ = f.Close()
+			return results, fmt.Errorf("scan rotated history %s: %w", name, err)
+		}
+		if err := gr.Close(); err != nil {
+			_ = f.Close()
+			return results, fmt.Errorf("close rotated history %s: %w", name, err)
+		}
+		if err := f.Close(); err != nil {
+			return results, fmt.Errorf("close rotated history file %s: %w", name, err)
+		}
 	}
-	return results
+	return results, nil
 }
 
 // buildIndex rebuilds the offsetIndex by scanning through the open history file.
@@ -278,7 +318,7 @@ func buildIndex(f *os.File) error {
 	}
 	offsetIndex = offsetIndex[:0]
 	scanner := bufio.NewScanner(f)
-	scanner.Buffer(make([]byte, 4*1024*1024), 4*1024*1024)
+	scanner.Buffer(make([]byte, 64*1024), maxHistoryLineSize)
 	var offset int64
 	for scanner.Scan() {
 		line := scanner.Bytes()
@@ -338,12 +378,17 @@ func RecurrenceMap(since time.Time) map[string]int {
 	mu.Lock()
 	defer mu.Unlock()
 
+	counts := make(map[string]int)
 	f, err := os.Open(histPath)
 	if os.IsNotExist(err) {
-		return nil
+		if config.Get().History.CompressRotated {
+			addCompressedRecurrences(counts, since)
+		}
+		return counts
 	}
 	if err != nil {
-		return nil
+		log.Printf("history: recurrence open: %v", err)
+		return counts
 	}
 	defer f.Close()
 
@@ -369,9 +414,8 @@ func RecurrenceMap(since time.Time) map[string]int {
 		return nil
 	}
 
-	counts := make(map[string]int)
 	scanner := bufio.NewScanner(f)
-	scanner.Buffer(make([]byte, 4*1024*1024), 4*1024*1024)
+	scanner.Buffer(make([]byte, 64*1024), maxHistoryLineSize)
 	for scanner.Scan() {
 		var e Entry
 		if err := json.Unmarshal(scanner.Bytes(), &e); err != nil {
@@ -389,7 +433,73 @@ func RecurrenceMap(since time.Time) map[string]int {
 			}
 		}
 	}
+	if err := scanner.Err(); err != nil {
+		log.Printf("history: recurrence scan error: %v", err)
+	}
+	if config.Get().History.CompressRotated {
+		addCompressedRecurrences(counts, since)
+	}
 	return counts
+}
+
+// addCompressedRecurrences augments counts with rotated history. Must be called
+// with mu held. Corrupt files are logged and skipped so recurrence scoring can
+// continue from the healthy history that remains.
+func addCompressedRecurrences(counts map[string]int, since time.Time) {
+	dir := filepath.Dir(histPath)
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		log.Printf("history: recurrence read rotated directory: %v", err)
+		return
+	}
+	for _, de := range entries {
+		name := de.Name()
+		if de.IsDir() || !strings.HasPrefix(name, "history_") || !strings.HasSuffix(name, ".jsonl.gz") {
+			continue
+		}
+		datePart := strings.TrimSuffix(strings.TrimPrefix(name, "history_"), ".jsonl.gz")
+		fileDate, err := time.Parse("2006-01-02", datePart)
+		if err != nil || fileDate.Add(24*time.Hour).Before(since) {
+			continue
+		}
+		path := filepath.Join(dir, name)
+		f, err := os.Open(path)
+		if err != nil {
+			log.Printf("history: recurrence open %s: %v", path, err)
+			continue
+		}
+		gr, err := gzip.NewReader(f)
+		if err != nil {
+			_ = f.Close()
+			log.Printf("history: recurrence gzip %s: %v", path, err)
+			continue
+		}
+		scanner := bufio.NewScanner(gr)
+		scanner.Buffer(make([]byte, 64*1024), maxHistoryLineSize)
+		for scanner.Scan() {
+			var e Entry
+			if json.Unmarshal(scanner.Bytes(), &e) != nil || e.Timestamp.Before(since) {
+				continue
+			}
+			addEntryRecurrences(counts, e)
+		}
+		if err := scanner.Err(); err != nil {
+			log.Printf("history: recurrence scan %s: %v", path, err)
+		}
+		_ = gr.Close()
+		_ = f.Close()
+	}
+}
+
+func addEntryRecurrences(counts map[string]int, e Entry) {
+	seen := make(map[string]struct{}, len(e.Flows))
+	for _, fl := range e.Flows {
+		k := RecurrenceKey(fl.SrcIP, fl.DstIP, fl.DstPort, fl.Protocol)
+		if _, dup := seen[k]; !dup {
+			seen[k] = struct{}{}
+			counts[k]++
+		}
+	}
 }
 
 // SetPathForTesting overrides the history file path and resets all state.
@@ -436,8 +546,9 @@ func pruneOld() {
 	}
 
 	var keep [][]byte
+	var keepBytes int64
 	scanner := bufio.NewScanner(f)
-	scanner.Buffer(make([]byte, 4*1024*1024), 4*1024*1024)
+	scanner.Buffer(make([]byte, 64*1024), maxHistoryLineSize)
 	for scanner.Scan() {
 		line := scanner.Bytes()
 		var entry Entry
@@ -445,9 +556,25 @@ func pruneOld() {
 			cp := make([]byte, len(line))
 			copy(cp, line)
 			keep = append(keep, cp)
+			keepBytes += int64(len(cp) + 1)
 		}
 	}
-	f.Close()
+	if err := scanner.Err(); err != nil {
+		_ = f.Close()
+		log.Printf("history: prune scan error: %v", err)
+		return
+	}
+	if err := f.Close(); err != nil {
+		log.Printf("history: prune close error: %v", err)
+		return
+	}
+
+	// Enforce MaxSizeMB as a hard cap by dropping the oldest retained entries.
+	maxBytes := int64(hcfg.MaxSizeMB) * 1024 * 1024
+	for maxBytes > 0 && keepBytes > maxBytes && len(keep) > 0 {
+		keepBytes -= int64(len(keep[0]) + 1)
+		keep = keep[1:]
+	}
 
 	dir := filepath.Dir(histPath)
 	tmp, err := os.CreateTemp(dir, ".history-prune-*")
@@ -457,14 +584,33 @@ func pruneOld() {
 	}
 	w := bufio.NewWriter(tmp)
 	for _, line := range keep {
-		w.Write(line)
-		w.WriteByte('\n')
+		if _, err := w.Write(line); err != nil {
+			_ = tmp.Close()
+			_ = os.Remove(tmp.Name())
+			log.Printf("history: prune write: %v", err)
+			return
+		}
+		if err := w.WriteByte('\n'); err != nil {
+			_ = tmp.Close()
+			_ = os.Remove(tmp.Name())
+			log.Printf("history: prune newline: %v", err)
+			return
+		}
 	}
-	w.Flush()
-	tmp.Close()
-	if err := os.Rename(tmp.Name(), histPath); err != nil {
+	if err := w.Flush(); err != nil {
+		_ = tmp.Close()
+		_ = os.Remove(tmp.Name())
+		log.Printf("history: prune flush: %v", err)
+		return
+	}
+	if err := tmp.Close(); err != nil {
+		_ = os.Remove(tmp.Name())
+		log.Printf("history: prune close temp: %v", err)
+		return
+	}
+	if err := replaceFileSafely(tmp.Name(), histPath); err != nil {
 		log.Printf("history: prune rename: %v", err)
-		os.Remove(tmp.Name())
+		_ = os.Remove(tmp.Name())
 		return
 	}
 	// The file has been rewritten — invalidate the offset index so the next
@@ -499,7 +645,7 @@ func rotateOldEntriesToGzip() {
 	var orderedDays []string // insertion order for deterministic output
 
 	scanner := bufio.NewScanner(f)
-	scanner.Buffer(make([]byte, 4*1024*1024), 4*1024*1024)
+	scanner.Buffer(make([]byte, 64*1024), maxHistoryLineSize)
 	for scanner.Scan() {
 		raw := scanner.Bytes()
 		cp := make([]byte, len(raw))
@@ -520,7 +666,15 @@ func rotateOldEntriesToGzip() {
 			todayLines = append(todayLines, cp)
 		}
 	}
-	f.Close()
+	if err := scanner.Err(); err != nil {
+		_ = f.Close()
+		log.Printf("history: rotate scan: %v", err)
+		return
+	}
+	if err := f.Close(); err != nil {
+		log.Printf("history: rotate close: %v", err)
+		return
+	}
 
 	if len(perDay) == 0 {
 		return // nothing to rotate
@@ -545,14 +699,33 @@ func rotateOldEntriesToGzip() {
 	}
 	bw := bufio.NewWriter(tmp)
 	for _, line := range todayLines {
-		bw.Write(line)
-		bw.WriteByte('\n')
+		if _, err := bw.Write(line); err != nil {
+			_ = tmp.Close()
+			_ = os.Remove(tmp.Name())
+			log.Printf("history: rotate write: %v", err)
+			return
+		}
+		if err := bw.WriteByte('\n'); err != nil {
+			_ = tmp.Close()
+			_ = os.Remove(tmp.Name())
+			log.Printf("history: rotate newline: %v", err)
+			return
+		}
 	}
-	bw.Flush()
-	tmp.Close()
-	if err := os.Rename(tmp.Name(), histPath); err != nil {
+	if err := bw.Flush(); err != nil {
+		_ = tmp.Close()
+		_ = os.Remove(tmp.Name())
+		log.Printf("history: rotate flush: %v", err)
+		return
+	}
+	if err := tmp.Close(); err != nil {
+		_ = os.Remove(tmp.Name())
+		log.Printf("history: rotate close temp: %v", err)
+		return
+	}
+	if err := replaceFileSafely(tmp.Name(), histPath); err != nil {
 		log.Printf("history: rotate rename: %v", err)
-		os.Remove(tmp.Name())
+		_ = os.Remove(tmp.Name())
 		return
 	}
 	offsetIndex = offsetIndex[:0]
@@ -560,7 +733,11 @@ func rotateOldEntriesToGzip() {
 	// Delete compressed files older than MaxRotatedDays.
 	if hcfg.MaxRotatedDays > 0 {
 		purgeCutoff := now.AddDate(0, 0, -hcfg.MaxRotatedDays)
-		des, _ := os.ReadDir(dir)
+		des, err := os.ReadDir(dir)
+		if err != nil {
+			log.Printf("history: purge read directory: %v", err)
+			return
+		}
 		for _, de := range des {
 			if de.IsDir() {
 				continue
@@ -575,7 +752,9 @@ func rotateOldEntriesToGzip() {
 				continue
 			}
 			if t.Before(purgeCutoff) {
-				os.Remove(filepath.Join(dir, name))
+				if err := os.Remove(filepath.Join(dir, name)); err != nil && !os.IsNotExist(err) {
+					log.Printf("history: purge %s: %v", name, err)
+				}
 			}
 		}
 	}
@@ -585,23 +764,47 @@ func rotateOldEntriesToGzip() {
 // and atomically rewrites the file. This ensures idempotent daily rotation.
 func mergeIntoGzip(path string, newLines [][]byte) error {
 	var existing [][]byte
+	seen := make(map[string]struct{})
 	if ef, err := os.Open(path); err == nil {
 		gr, gerr := gzip.NewReader(ef)
 		if gerr == nil {
 			scanner := bufio.NewScanner(gr)
-			scanner.Buffer(make([]byte, 4*1024*1024), 4*1024*1024)
+			scanner.Buffer(make([]byte, 64*1024), maxHistoryLineSize)
 			for scanner.Scan() {
 				raw := scanner.Bytes()
 				cp := make([]byte, len(raw))
 				copy(cp, raw)
 				existing = append(existing, cp)
+				seen[string(cp)] = struct{}{}
 			}
-			gr.Close()
+			if err := scanner.Err(); err != nil {
+				_ = gr.Close()
+				_ = ef.Close()
+				return fmt.Errorf("scan existing gzip: %w", err)
+			}
+			if err := gr.Close(); err != nil {
+				_ = ef.Close()
+				return fmt.Errorf("close existing gzip: %w", err)
+			}
+		} else {
+			_ = ef.Close()
+			return fmt.Errorf("open existing gzip: %w", gerr)
 		}
-		ef.Close()
+		if err := ef.Close(); err != nil {
+			return fmt.Errorf("close existing gzip file: %w", err)
+		}
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("open existing gzip file: %w", err)
 	}
 
-	all := append(existing, newLines...)
+	all := existing
+	for _, line := range newLines {
+		if _, duplicate := seen[string(line)]; duplicate {
+			continue
+		}
+		seen[string(line)] = struct{}{}
+		all = append(all, line)
+	}
 
 	tmp, err := os.CreateTemp(filepath.Dir(path), ".history-gz-*")
 	if err != nil {
@@ -615,8 +818,18 @@ func mergeIntoGzip(path string, newLines [][]byte) error {
 	}
 	bw := bufio.NewWriter(gz)
 	for _, line := range all {
-		bw.Write(line)
-		bw.WriteByte('\n')
+		if _, err := bw.Write(line); err != nil {
+			_ = gz.Close()
+			_ = tmp.Close()
+			_ = os.Remove(tmp.Name())
+			return fmt.Errorf("write gzip: %w", err)
+		}
+		if err := bw.WriteByte('\n'); err != nil {
+			_ = gz.Close()
+			_ = tmp.Close()
+			_ = os.Remove(tmp.Name())
+			return fmt.Errorf("write gzip newline: %w", err)
+		}
 	}
 	if err := bw.Flush(); err != nil {
 		gz.Close()
@@ -629,10 +842,48 @@ func mergeIntoGzip(path string, newLines [][]byte) error {
 		os.Remove(tmp.Name())
 		return fmt.Errorf("gzip close: %w", err)
 	}
-	tmp.Close()
-	if err := os.Rename(tmp.Name(), path); err != nil {
-		os.Remove(tmp.Name())
+	if err := tmp.Close(); err != nil {
+		_ = os.Remove(tmp.Name())
+		return fmt.Errorf("close temp: %w", err)
+	}
+	if err := replaceFileSafely(tmp.Name(), path); err != nil {
+		_ = os.Remove(tmp.Name())
 		return fmt.Errorf("rename: %w", err)
+	}
+	return nil
+}
+
+// replaceFileSafely uses a direct atomic rename where the platform supports
+// replacing an existing destination. On Windows it falls back to a recoverable
+// backup-and-swap sequence and restores the original if installation fails.
+func replaceFileSafely(tempPath, dstPath string) error {
+	if err := os.Rename(tempPath, dstPath); err == nil {
+		return nil
+	}
+
+	backup, err := os.CreateTemp(filepath.Dir(dstPath), ".history-backup-*")
+	if err != nil {
+		return fmt.Errorf("create replacement backup: %w", err)
+	}
+	backupPath := backup.Name()
+	if err := backup.Close(); err != nil {
+		_ = os.Remove(backupPath)
+		return fmt.Errorf("close replacement backup: %w", err)
+	}
+	if err := os.Remove(backupPath); err != nil {
+		return fmt.Errorf("prepare replacement backup: %w", err)
+	}
+	if err := os.Rename(dstPath, backupPath); err != nil {
+		return fmt.Errorf("backup destination: %w", err)
+	}
+	if err := os.Rename(tempPath, dstPath); err != nil {
+		if restoreErr := os.Rename(backupPath, dstPath); restoreErr != nil {
+			return fmt.Errorf("replace destination: %w (restore failed: %v; backup retained at %s)", err, restoreErr, backupPath)
+		}
+		return fmt.Errorf("replace destination: %w (original restored)", err)
+	}
+	if err := os.Remove(backupPath); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("remove replacement backup %s: %w", backupPath, err)
 	}
 	return nil
 }

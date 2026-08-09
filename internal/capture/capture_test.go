@@ -12,6 +12,7 @@ import (
 
 	"github.com/google/gopacket"
 	"github.com/google/gopacket/layers"
+	"github.com/google/gopacket/pcapgo"
 )
 
 // ─── TLS SNI extraction ───────────────────────────────────────────────────────
@@ -27,7 +28,7 @@ func buildClientHello(hostname string) []byte {
 	sniData := make([]byte, 0, 2+1+2+len(name))
 	sniData = append(sniData,
 		byte(listLen>>8), byte(listLen),
-		0x00,                              // name_type = host_name
+		0x00, // name_type = host_name
 		byte(len(name)>>8), byte(len(name)),
 	)
 	sniData = append(sniData, name...)
@@ -292,11 +293,11 @@ func TestExtractTLSSNI(t *testing.T) {
 			name: "Extensions total length overflows handshake body",
 			payload: func() []byte {
 				var body []byte
-				body = append(body, 0x03, 0x03)          // client_version TLS 1.2
-				body = append(body, make([]byte, 32)...) // random
-				body = append(body, 0x00)                // session_id_len = 0
+				body = append(body, 0x03, 0x03)             // client_version TLS 1.2
+				body = append(body, make([]byte, 32)...)    // random
+				body = append(body, 0x00)                   // session_id_len = 0
 				body = append(body, 0x00, 0x02, 0xc0, 0x2b) // cipher suites (2 bytes)
-				body = append(body, 0x01, 0x00)          // comp_methods len=1, method=null
+				body = append(body, 0x01, 0x00)             // comp_methods len=1, method=null
 				// extTotal = 0x01, 0x00 = 256, but only 4 real bytes follow.
 				body = append(body, 0x01, 0x00)
 				body = append(body, 0x00, 0x00, 0x00, 0x00) // 4 bytes of ext data (not 256)
@@ -327,11 +328,11 @@ func TestExtractTLSSNI(t *testing.T) {
 
 				allExts := append(dummyExt, sniExt...)
 				var body []byte
-				body = append(body, 0x03, 0x03)          // version TLS 1.2
-				body = append(body, make([]byte, 32)...) // random
-				body = append(body, 0x00)                // session_id_len = 0
+				body = append(body, 0x03, 0x03)             // version TLS 1.2
+				body = append(body, make([]byte, 32)...)    // random
+				body = append(body, 0x00)                   // session_id_len = 0
 				body = append(body, 0x00, 0x02, 0xc0, 0x2b) // cipher suites
-				body = append(body, 0x01, 0x00)          // comp methods
+				body = append(body, 0x01, 0x00)             // comp methods
 				body = append(body, byte(len(allExts)>>8), byte(len(allExts)))
 				body = append(body, allExts...)
 
@@ -430,9 +431,9 @@ func buildDNSResponsePacket(questionName string) gopacket.Packet {
 
 func TestExtractDNSQuery(t *testing.T) {
 	tests := []struct {
-		name   string
-		pkt    gopacket.Packet
-		want   string
+		name string
+		pkt  gopacket.Packet
+		want string
 	}{
 		{
 			name: "standard A query",
@@ -776,6 +777,44 @@ func TestOfflineReader_Read_ValidPacket(t *testing.T) {
 	}
 }
 
+func TestOfflineReader_Read_PcapNG(t *testing.T) {
+	rawPkt := buildIPv4TCPPacket(t, "10.0.0.1", "10.0.0.2", 12345, 443, nil).Data()
+	path := filepath.Join(t.TempDir(), "capture.pcapng")
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatalf("create pcapng: %v", err)
+	}
+	w, err := pcapgo.NewNgWriter(f, layers.LinkTypeEthernet)
+	if err != nil {
+		_ = f.Close()
+		t.Fatalf("new pcapng writer: %v", err)
+	}
+	ci := gopacket.CaptureInfo{Timestamp: time.Now(), CaptureLength: len(rawPkt), Length: len(rawPkt)}
+	if err := w.WritePacket(ci, rawPkt); err != nil {
+		_ = f.Close()
+		t.Fatalf("write pcapng packet: %v", err)
+	}
+	if err := w.Flush(); err != nil {
+		_ = f.Close()
+		t.Fatalf("flush pcapng: %v", err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatalf("close pcapng: %v", err)
+	}
+
+	ch, err := OfflineReader{FilePath: path}.Read(context.Background())
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	events := make([]PacketEvent, 0, 1)
+	for event := range ch {
+		events = append(events, event)
+	}
+	if len(events) != 1 || events[0].DstPort != 443 {
+		t.Fatalf("unexpected pcapng events: %+v", events)
+	}
+}
+
 func TestOfflineReader_Read_EmptyFile_ClosesChannel(t *testing.T) {
 	path := writePcapFile(t, nil)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -841,7 +880,7 @@ func TestOfflineReader_Read_ContextCancel_ClosesChannel(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	<-ch   // receive at least one event
+	<-ch     // receive at least one event
 	cancel() // cancel before draining all 500
 	for range ch {
 	} // must close cleanly
@@ -1005,6 +1044,7 @@ func TestExtractDNSResponse(t *testing.T) {
 		pkt        gopacket.Packet
 		wantNX     bool
 		wantMinTTL uint32
+		wantFound  bool
 	}{
 		{
 			name:       "query packet is ignored",
@@ -1019,8 +1059,8 @@ func TestExtractDNSResponse(t *testing.T) {
 			wantMinTTL: 0,
 		},
 		{
-			name: "NXDOMAIN with no answers",
-			pkt: buildDNSResponseWithAnswers(layers.DNSResponseCodeNXDomain, nil),
+			name:       "NXDOMAIN with no answers",
+			pkt:        buildDNSResponseWithAnswers(layers.DNSResponseCodeNXDomain, nil),
 			wantNX:     true,
 			wantMinTTL: 0,
 		},
@@ -1031,6 +1071,7 @@ func TestExtractDNSResponse(t *testing.T) {
 			}),
 			wantNX:     false,
 			wantMinTTL: 300,
+			wantFound:  true,
 		},
 		{
 			name: "multiple A records — returns minimum TTL",
@@ -1041,6 +1082,7 @@ func TestExtractDNSResponse(t *testing.T) {
 			}),
 			wantNX:     false,
 			wantMinTTL: 60,
+			wantFound:  true,
 		},
 		{
 			name: "fast-flux TTL=0 is preserved (not treated as absent)",
@@ -1050,6 +1092,7 @@ func TestExtractDNSResponse(t *testing.T) {
 			}),
 			wantNX:     false,
 			wantMinTTL: 0,
+			wantFound:  true,
 		},
 		{
 			name: "only MX records — no A/AAAA — minTTL stays 0",
@@ -1062,12 +1105,15 @@ func TestExtractDNSResponse(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			gotNX, gotMinTTL := extractDNSResponse(tc.pkt)
+			gotNX, gotMinTTL, gotFound := extractDNSResponse(tc.pkt)
 			if gotNX != tc.wantNX {
 				t.Errorf("nxdomain: got %v, want %v", gotNX, tc.wantNX)
 			}
 			if gotMinTTL != tc.wantMinTTL {
 				t.Errorf("minTTL: got %d, want %d", gotMinTTL, tc.wantMinTTL)
+			}
+			if gotFound != tc.wantFound {
+				t.Errorf("found: got %v, want %v", gotFound, tc.wantFound)
 			}
 		})
 	}

@@ -70,7 +70,7 @@ func buildClientHello(version uint16, cipherSuites, extensions []uint16, curves 
 	csLen := len(csBytes)
 	chBody = append(chBody, byte(csLen>>8), byte(csLen)) // cipher suites length
 	chBody = append(chBody, csBytes...)
-	chBody = append(chBody, 0x01, 0x00)                                  // compression: 1 method, null
+	chBody = append(chBody, 0x01, 0x00) // compression: 1 method, null
 	extLen := len(extBuf)
 	chBody = append(chBody, byte(extLen>>8), byte(extLen)) // extensions total length
 	chBody = append(chBody, extBuf...)
@@ -85,8 +85,8 @@ func buildClientHello(version uint16, cipherSuites, extensions []uint16, curves 
 	// TLS record: type(1) + version(2) + length(2) + handshake
 	recLen := len(hs)
 	var rec []byte
-	rec = append(rec, 0x16)             // Handshake
-	rec = append(rec, 0x03, 0x01)       // TLS 1.0 record version
+	rec = append(rec, 0x16)       // Handshake
+	rec = append(rec, 0x03, 0x01) // TLS 1.0 record version
 	rec = append(rec, byte(recLen>>8), byte(recLen))
 	rec = append(rec, hs...)
 	return rec
@@ -139,7 +139,7 @@ func TestFingerprint_NotTLS_ReturnsEmpty(t *testing.T) {
 	payloads := [][]byte{
 		nil,
 		{},
-		{0x17, 0x03, 0x01, 0x00, 0x05}, // Alert, not Handshake
+		{0x17, 0x03, 0x01, 0x00, 0x05},       // Alert, not Handshake
 		{0x16, 0x03, 0x01, 0x00, 0x01, 0x02}, // too short for ClientHello
 		make([]byte, 4),
 	}
@@ -181,8 +181,8 @@ func TestFingerprint_WithGREASEFiltered(t *testing.T) {
 func TestFingerprint_WithExtensionsAndCurves(t *testing.T) {
 	ciphers := []uint16{0x002f, 0x0035, 0xc02b}
 	exts := []uint16{0x0000, 0x000f, 0x0010} // SNI, heartbeat, ALPN
-	curves := []uint16{0x001d, 0x0017}        // x25519, secp256r1
-	ecPt := []uint8{0x00}                     // uncompressed
+	curves := []uint16{0x001d, 0x0017}       // x25519, secp256r1
+	ecPt := []uint8{0x00}                    // uncompressed
 
 	payload := buildClientHello(0x0303, ciphers, exts, curves, ecPt)
 	got := Fingerprint(payload)

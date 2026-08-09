@@ -44,15 +44,15 @@ func expectedHASH(kex, enc, mac, comp string) string {
 func TestExtractHASH_ValidKexInit(t *testing.T) {
 	fields := [10]string{
 		"curve25519-sha256,diffie-hellman-group14-sha256", // kex
-		"ssh-rsa,ecdsa-sha2-nistp256",                    // server_host_key
-		"aes128-ctr,aes256-ctr",                          // enc_c2s
-		"aes128-ctr,aes256-ctr",                          // enc_s2c
-		"hmac-sha2-256,hmac-sha1",                        // mac_c2s
-		"hmac-sha2-256,hmac-sha1",                        // mac_s2c
-		"none,zlib@openssh.com",                          // comp_c2s
-		"none,zlib@openssh.com",                          // comp_s2c
-		"",                                               // lang_c2s
-		"",                                               // lang_s2c
+		"ssh-rsa,ecdsa-sha2-nistp256",                     // server_host_key
+		"aes128-ctr,aes256-ctr",                           // enc_c2s
+		"aes128-ctr,aes256-ctr",                           // enc_s2c
+		"hmac-sha2-256,hmac-sha1",                         // mac_c2s
+		"hmac-sha2-256,hmac-sha1",                         // mac_s2c
+		"none,zlib@openssh.com",                           // comp_c2s
+		"none,zlib@openssh.com",                           // comp_s2c
+		"",                                                // lang_c2s
+		"",                                                // lang_s2c
 	}
 	raw := buildSSHKexInit(fields)
 	hash := ExtractHASH(raw)

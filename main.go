@@ -6,14 +6,15 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"os/signal"
 	"syscall"
 	"time"
 
-	"github.com/ClementG91/MCP-FlowSentinel/internal/alerting"
 	"github.com/ClementG91/MCP-FlowSentinel/internal/aggregate"
+	"github.com/ClementG91/MCP-FlowSentinel/internal/alerting"
 	"github.com/ClementG91/MCP-FlowSentinel/internal/capture"
 	"github.com/ClementG91/MCP-FlowSentinel/internal/config"
 	"github.com/ClementG91/MCP-FlowSentinel/internal/daemon"
@@ -42,19 +43,15 @@ func main() {
 		}
 	}
 
-	// Load config early so all subsystems share the same values.
-	if _, err := config.Load(configPath); err != nil {
-		fmt.Fprintf(os.Stderr, "config error: %v\n", err)
-		os.Exit(1)
-	}
-
+	// Commands that do not consume runtime configuration remain available even
+	// when the user's config file is missing or invalid.
 	if len(filteredArgs) > 0 {
 		switch filteredArgs[0] {
+		case "--help", "-h":
+			printUsage(os.Stdout)
+			return
 		case "--version", "-v":
 			fmt.Printf("mcp-flowsentinel %s\n", version)
-			return
-		case "--check":
-			runCheck()
 			return
 		case "--update":
 			if err := updater.CheckAndUpdate(version); err != nil {
@@ -74,12 +71,26 @@ func main() {
 			fmt.Printf("Config written to: %s\n", path)
 			fmt.Println("Edit it then restart the server (or run with --config <path>).")
 			return
+		}
+	}
+
+	// Load config before commands and modes that consume runtime settings.
+	if _, err := config.Load(configPath); err != nil {
+		fmt.Fprintf(os.Stderr, "config error: %v\n", err)
+		os.Exit(1)
+	}
+
+	if len(filteredArgs) > 0 {
+		switch filteredArgs[0] {
+		case "--check":
+			runCheck()
+			return
 		case "--validate-config":
 			cfg := config.Get()
 			data, _ := json.MarshalIndent(map[string]any{
-				"status":      "ok",
-				"loaded_from": config.LoadedPath(),
-				"alerting_enabled": cfg.Alerting.Enabled,
+				"status":              "ok",
+				"loaded_from":         config.LoadedPath(),
+				"alerting_enabled":    cfg.Alerting.Enabled,
 				"min_score_threshold": cfg.Alerting.MinScoreThreshold,
 			}, "", "  ")
 			fmt.Println(string(data))
@@ -92,18 +103,7 @@ func main() {
 			runDaemon()
 			return
 		default:
-			fmt.Fprintf(os.Stderr, "Usage: %s [options] [command]\n\n", os.Args[0])
-			fmt.Fprintf(os.Stderr, "Commands:\n")
-			fmt.Fprintf(os.Stderr, "  (none)            Start MCP server on stdio\n")
-			fmt.Fprintf(os.Stderr, "  --daemon          Run continuous background monitoring + MCP server\n")
-			fmt.Fprintf(os.Stderr, "  --check           Verify pcap access and list interfaces\n")
-			fmt.Fprintf(os.Stderr, "  --init-config     Write a default config.yaml and exit\n")
-			fmt.Fprintf(os.Stderr, "  --validate-config Validate loaded config and exit\n")
-			fmt.Fprintf(os.Stderr, "  --test-alert      Send a test webhook alert and exit\n")
-			fmt.Fprintf(os.Stderr, "  --update          Update to the latest release\n")
-			fmt.Fprintf(os.Stderr, "  --version         Print version and exit\n\n")
-			fmt.Fprintf(os.Stderr, "Options:\n")
-			fmt.Fprintf(os.Stderr, "  --config <path>   Load config from path (default: %s)\n", config.DefaultPath())
+			printUsage(os.Stderr)
 			os.Exit(1)
 		}
 	}
@@ -121,6 +121,23 @@ func main() {
 	if err := server.NewStdioServer(s).Listen(ctx, os.Stdin, os.Stdout); err != nil {
 		log.Fatalf("fatal: %v", err)
 	}
+}
+
+func printUsage(w io.Writer) {
+	fmt.Fprintf(w, "Usage: %s [options] [command]\n\n", os.Args[0])
+	fmt.Fprintln(w, "Commands:")
+	fmt.Fprintln(w, "  (none)            Start MCP server on stdio")
+	fmt.Fprintln(w, "  --daemon          Run continuous background monitoring + MCP server")
+	fmt.Fprintln(w, "  --check           Verify pcap access and list interfaces")
+	fmt.Fprintln(w, "  --init-config     Write a default config.yaml and exit")
+	fmt.Fprintln(w, "  --validate-config Validate loaded config and exit")
+	fmt.Fprintln(w, "  --test-alert      Send a test webhook alert and exit")
+	fmt.Fprintln(w, "  --update          Update to the latest release")
+	fmt.Fprintln(w, "  --version         Print version and exit")
+	fmt.Fprintln(w, "  --help            Print this help and exit")
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "Options:")
+	fmt.Fprintf(w, "  --config <path>   Load config from path (default: %s)\n", config.DefaultPath())
 }
 
 // runDaemon starts the continuous monitoring loop alongside the MCP server.

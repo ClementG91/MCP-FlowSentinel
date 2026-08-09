@@ -21,10 +21,10 @@ import (
 	"github.com/ClementG91/MCP-FlowSentinel/internal/history"
 	"github.com/google/gopacket"
 	"github.com/google/gopacket/layers"
-	psnet "github.com/shirou/gopsutil/v3/net"
-	"github.com/shirou/gopsutil/v3/process"
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
+	psnet "github.com/shirou/gopsutil/v3/net"
+	"github.com/shirou/gopsutil/v3/process"
 )
 
 // toolsWritePcapFile creates a minimal valid pcap v2.4 (LE, Ethernet) file
@@ -432,7 +432,7 @@ func TestGetFlowHistory_WithAllFilters_ReturnsValidJSON(t *testing.T) {
 	}
 	text := resultText(t, r)
 	var out struct {
-		Entries  []any `json:"entries"`
+		Entries   []any `json:"entries"`
 		QueryInfo struct {
 			MaxAgeHours float64 `json:"max_age_hours"`
 		} `json:"query_info"`
@@ -755,7 +755,7 @@ func TestGetConfig_MasksWebhookURL(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	text := resultText(t, r)
-	if strings.Contains(text, "secret") {
+	if strings.Contains(text, cfg.Alerting.WebhookURL) {
 		t.Error("webhook URL should be masked in get_config response")
 	}
 	if !strings.Contains(text, `"***"`) {

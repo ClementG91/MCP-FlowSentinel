@@ -24,12 +24,14 @@ import (
 	"github.com/ClementG91/MCP-FlowSentinel/internal/aggregate"
 	"github.com/ClementG91/MCP-FlowSentinel/internal/cache"
 	"github.com/ClementG91/MCP-FlowSentinel/internal/config"
+	"github.com/ClementG91/MCP-FlowSentinel/internal/metrics"
 )
 
-const (
-	maxRetries    = 3
-	retryBaseWait = time.Second
-)
+const maxRetries = 3
+
+// retryBaseWait is a variable so package tests can shorten asynchronous retry
+// cycles without weakening the production back-off.
+var retryBaseWait = time.Second
 
 // ─── Token-bucket rate limiter ────────────────────────────────────────────────
 
@@ -37,10 +39,10 @@ const (
 // webhook POSTs per minute with a burst equal to maxPerMinute.
 // A value of 0 means unlimited.
 type rateLimiter struct {
-	mu           sync.Mutex
-	tokens       int
-	max          int
-	lastRefill   time.Time
+	mu         sync.Mutex
+	tokens     int
+	max        int
+	lastRefill time.Time
 }
 
 func newRateLimiter(maxPerMinute int) *rateLimiter {
@@ -81,8 +83,8 @@ func (r *rateLimiter) allow() bool {
 // It is replaced atomically via rateLimiterMu.
 var (
 	rateLimiterMu      sync.RWMutex
-	globalRateLimiter  = newRateLimiter(60) // default 60/min
-	rateLimiterLastMax int                  = 60
+	globalRateLimiter      = newRateLimiter(60) // default 60/min
+	rateLimiterLastMax int = 60
 )
 
 func getRateLimiter(maxPerMinute int) *rateLimiter {
@@ -116,10 +118,21 @@ func signPayload(secret string, body []byte) string {
 
 // alert is the JSON body sent to the webhook endpoint.
 type alert struct {
-	Source    string                 `json:"source"`
-	Timestamp time.Time              `json:"timestamp"`
-	Severity  string                 `json:"severity"`
-	Flow      aggregate.FlowRecord   `json:"flow"`
+	Source    string               `json:"source"`
+	Timestamp time.Time            `json:"timestamp"`
+	Severity  string               `json:"severity"`
+	Flow      aggregate.FlowRecord `json:"flow"`
+	Text      string               `json:"text"`    // Slack incoming webhooks
+	Content   string               `json:"content"` // Discord incoming webhooks
+}
+
+func makeAlert(source, severity string, flow aggregate.FlowRecord) alert {
+	message := fmt.Sprintf("[%s] MCP-FlowSentinel: %s:%d → %s:%d (%s, score %.1f)",
+		severity, flow.SrcIP, flow.SrcPort, flow.DstIP, flow.DstPort, flow.Protocol, flow.SuspicionScore)
+	return alert{
+		Source: source, Timestamp: time.Now().UTC(), Severity: severity, Flow: flow,
+		Text: message, Content: message,
+	}
 }
 
 // dedupCache is a bounded LRU cache (max 10 000 entries) used for alert
@@ -194,6 +207,7 @@ func Fire(flows []aggregate.FlowRecord) {
 		}
 		severity := f.RiskLevel
 		firedCount.Add(1)
+		metrics.RecordAlert()
 		writeAlertRecord(AlertRecord{
 			Timestamp: time.Now().UTC(),
 			Severity:  severity,
@@ -205,12 +219,7 @@ func Fire(flows []aggregate.FlowRecord) {
 }
 
 func post(url, secret string, flow aggregate.FlowRecord, severity string) {
-	body, err := json.Marshal(alert{
-		Source:    "mcp-flowsentinel",
-		Timestamp: time.Now().UTC(),
-		Severity:  severity,
-		Flow:      flow,
-	})
+	body, err := json.Marshal(makeAlert("mcp-flowsentinel", severity, flow))
 	if err != nil {
 		log.Printf("alerting: marshal error: %v", err)
 		return
@@ -223,7 +232,7 @@ func post(url, secret string, flow aggregate.FlowRecord, severity string) {
 			// Exponential back-off: 1s, 2s, 4s, …
 			time.Sleep(retryBaseWait << (attempt - 1))
 		}
-		req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(body))
+		req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(body)) // #nosec G704 -- the webhook target is local operator configuration.
 		if err != nil {
 			lastErr = err
 			continue
@@ -232,7 +241,7 @@ func post(url, secret string, flow aggregate.FlowRecord, severity string) {
 		if secret != "" {
 			req.Header.Set("X-FlowSentinel-Signature", signPayload(secret, body))
 		}
-		resp, err := client.Do(req)
+		resp, err := client.Do(req) // #nosec G704 -- the webhook target is local operator configuration.
 		if err != nil {
 			lastErr = err
 			log.Printf("alerting: webhook POST attempt %d/%d failed: %v", attempt+1, maxRetries, err)
@@ -252,6 +261,7 @@ func post(url, secret string, flow aggregate.FlowRecord, severity string) {
 		return
 	}
 	webhookFailures.Add(1)
+	metrics.RecordWebhookFailure()
 	log.Printf("alerting: all %d attempts failed for %s:%d→%s:%d: %v",
 		maxRetries, flow.SrcIP, flow.SrcPort, flow.DstIP, flow.DstPort, lastErr)
 }
@@ -270,17 +280,12 @@ func FireTest(flow aggregate.FlowRecord) error {
 	}
 
 	severity := "TEST"
-	body, err := json.Marshal(alert{
-		Source:    "mcp-flowsentinel/test",
-		Timestamp: time.Now().UTC(),
-		Severity:  severity,
-		Flow:      flow,
-	})
+	body, err := json.Marshal(makeAlert("mcp-flowsentinel/test", severity, flow))
 	if err != nil {
 		return fmt.Errorf("marshal: %w", err)
 	}
 
-	req, err := http.NewRequest(http.MethodPost, webhookURL, bytes.NewReader(body))
+	req, err := http.NewRequest(http.MethodPost, webhookURL, bytes.NewReader(body)) // #nosec G704 -- the webhook target is local operator configuration.
 	if err != nil {
 		return fmt.Errorf("build request: %w", err)
 	}
@@ -290,7 +295,7 @@ func FireTest(flow aggregate.FlowRecord) error {
 	}
 
 	client := &http.Client{Timeout: 5 * time.Second}
-	resp, err := client.Do(req)
+	resp, err := client.Do(req) // #nosec G704 -- the webhook target is local operator configuration.
 	if err != nil {
 		return fmt.Errorf("POST failed: %w", err)
 	}

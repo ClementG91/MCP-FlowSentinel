@@ -16,8 +16,10 @@ func registerReloadConfig(s *server.MCPServer) {
 
 Re-reads the YAML config from the last loaded path (or the default path if
 no file was loaded at startup). Useful after editing config values while the
-server is running — scoring thresholds, webhook URL, alerting settings, and
-daemon parameters all take effect immediately on the next operation.
+server is running. Scoring, history, webhook, and alerting settings take effect
+on the next operation. Daemon interfaces, capture interval, metrics listener,
+and feed-updater schedules require a restart because their goroutines are
+created when daemon mode starts.
 
 Note: GeoIP database paths only take effect on restart. The DNS cache TTL
 and size also require a restart.
@@ -33,13 +35,13 @@ func reloadConfigHandler(_ context.Context, _ mcp.CallToolRequest) (*mcp.CallToo
 	}
 
 	type summary struct {
-		LoadedFrom            string  `json:"loaded_from"`
-		AlertingEnabled       bool    `json:"alerting_enabled"`
-		MinScoreThreshold     float64 `json:"min_score_threshold"`
-		BeaconingStrongCV     float64 `json:"beaconing_strong_cv"`
-		CaptureIntervalSec    int     `json:"daemon_capture_interval_seconds"`
-		ExtraCmdlinePatterns  int     `json:"extra_cmdline_patterns_compiled"`
-		ExtraJA3BadHashes     int     `json:"extra_ja3_bad_hashes"`
+		LoadedFrom           string  `json:"loaded_from"`
+		AlertingEnabled      bool    `json:"alerting_enabled"`
+		MinScoreThreshold    float64 `json:"min_score_threshold"`
+		BeaconingStrongCV    float64 `json:"beaconing_strong_cv"`
+		CaptureIntervalSec   int     `json:"daemon_capture_interval_seconds"`
+		ExtraCmdlinePatterns int     `json:"extra_cmdline_patterns_compiled"`
+		ExtraJA3BadHashes    int     `json:"extra_ja3_bad_hashes"`
 	}
 
 	s := summary{

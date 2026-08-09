@@ -11,7 +11,7 @@
 package capture
 
 import (
-	"crypto/md5"
+	"crypto/md5" // #nosec G501 -- HASSH compatibility requires the protocol-defined MD5 digest.
 	"encoding/binary"
 	"encoding/hex"
 	"strings"
@@ -47,7 +47,7 @@ func ExtractHASH(payload []byte) string {
 		return ""
 	}
 	s := kex + ";" + enc + ";" + mac + ";" + comp
-	sum := md5.Sum([]byte(s))
+	sum := md5.Sum([]byte(s)) // #nosec G401 -- HASSH compatibility requires the protocol-defined MD5 digest.
 	return hex.EncodeToString(sum[:])
 }
 

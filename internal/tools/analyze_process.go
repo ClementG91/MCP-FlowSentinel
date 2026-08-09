@@ -10,10 +10,10 @@ import (
 
 	"github.com/ClementG91/MCP-FlowSentinel/internal/history"
 	"github.com/ClementG91/MCP-FlowSentinel/internal/intel"
-	psnet "github.com/shirou/gopsutil/v3/net"
-	"github.com/shirou/gopsutil/v3/process"
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
+	psnet "github.com/shirou/gopsutil/v3/net"
+	"github.com/shirou/gopsutil/v3/process"
 )
 
 func registerAnalyzeProcess(s *server.MCPServer) {
@@ -40,16 +40,16 @@ func registerAnalyzeProcess(s *server.MCPServer) {
 
 // processReport is the per-process output structure.
 type processReport struct {
-	PID                int32              `json:"pid"`
-	Name               string             `json:"name"`
-	BinaryPath         string             `json:"binary_path,omitempty"`
-	Cmdline            string             `json:"cmdline,omitempty"`
-	Username           string             `json:"username,omitempty"`
-	CreateTimeMs       int64              `json:"create_time_ms,omitempty"`
-	ParentChain        []parentInfo       `json:"parent_chain,omitempty"`
-	CurrentConnections []enrichedConn     `json:"current_connections"`
-	HistoryFlowCount   int                `json:"history_flow_count_24h"`
-	AnalyzedAt         time.Time          `json:"analyzed_at"`
+	PID                int32          `json:"pid"`
+	Name               string         `json:"name"`
+	BinaryPath         string         `json:"binary_path,omitempty"`
+	Cmdline            string         `json:"cmdline,omitempty"`
+	Username           string         `json:"username,omitempty"`
+	CreateTimeMs       int64          `json:"create_time_ms,omitempty"`
+	ParentChain        []parentInfo   `json:"parent_chain,omitempty"`
+	CurrentConnections []enrichedConn `json:"current_connections"`
+	HistoryFlowCount   int            `json:"history_flow_count_24h"`
+	AnalyzedAt         time.Time      `json:"analyzed_at"`
 }
 
 type parentInfo struct {
@@ -124,10 +124,10 @@ func analyzeProcessHandler(_ context.Context, req mcp.CallToolRequest) (*mcp.Cal
 	})
 
 	type response struct {
-		AnalyzedAt    time.Time        `json:"analyzed_at"`
+		AnalyzedAt     time.Time       `json:"analyzed_at"`
 		ProcessesFound int             `json:"processes_found"`
-		GeoIPEnabled  bool             `json:"geoip_enabled"`
-		Processes     []processReport  `json:"processes"`
+		GeoIPEnabled   bool            `json:"geoip_enabled"`
+		Processes      []processReport `json:"processes"`
 	}
 
 	out, err := json.Marshal(response{

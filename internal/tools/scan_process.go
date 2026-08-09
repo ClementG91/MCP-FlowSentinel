@@ -43,20 +43,20 @@ func registerScanProcess(s *server.MCPServer) {
 
 // scanReport is the output for a single process security scan.
 type scanReport struct {
-	PID              int32    `json:"pid"`
-	Name             string   `json:"name"`
-	BinaryPath       string   `json:"binary_path,omitempty"`
-	SHA256           string   `json:"sha256,omitempty"`
-	SHA256Error      string   `json:"sha256_error,omitempty"`
-	BinarySizeBytes  int64    `json:"binary_size_bytes,omitempty"`
-	IsSystemPath     bool     `json:"is_system_path"`
-	LoadedModules    []string `json:"loaded_modules,omitempty"`
-	VTDetections     int      `json:"vt_detections,omitempty"`     // number of AV engines flagging the hash
-	VTTotal          int      `json:"vt_total,omitempty"`          // total engines scanned
-	VTLookupError    string   `json:"vt_lookup_error,omitempty"`
-	VTPermalink      string   `json:"vt_permalink,omitempty"`
-	SuspiciousSignals []string `json:"suspicious_signals,omitempty"`
-	ScannedAt        time.Time `json:"scanned_at"`
+	PID               int32     `json:"pid"`
+	Name              string    `json:"name"`
+	BinaryPath        string    `json:"binary_path,omitempty"`
+	SHA256            string    `json:"sha256,omitempty"`
+	SHA256Error       string    `json:"sha256_error,omitempty"`
+	BinarySizeBytes   int64     `json:"binary_size_bytes,omitempty"`
+	IsSystemPath      bool      `json:"is_system_path"`
+	LoadedModules     []string  `json:"loaded_modules,omitempty"`
+	VTDetections      int       `json:"vt_detections,omitempty"` // number of AV engines flagging the hash
+	VTTotal           int       `json:"vt_total,omitempty"`      // total engines scanned
+	VTLookupError     string    `json:"vt_lookup_error,omitempty"`
+	VTPermalink       string    `json:"vt_permalink,omitempty"`
+	SuspiciousSignals []string  `json:"suspicious_signals,omitempty"`
+	ScannedAt         time.Time `json:"scanned_at"`
 }
 
 func scanProcessHandler(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -103,10 +103,10 @@ func scanProcessHandler(_ context.Context, req mcp.CallToolRequest) (*mcp.CallTo
 	}
 
 	type response struct {
-		ScannedAt       time.Time    `json:"scanned_at"`
-		ProcessesFound  int          `json:"processes_found"`
-		VTEnabled       bool         `json:"virustotal_enabled"`
-		Processes       []scanReport `json:"processes"`
+		ScannedAt      time.Time    `json:"scanned_at"`
+		ProcessesFound int          `json:"processes_found"`
+		VTEnabled      bool         `json:"virustotal_enabled"`
+		Processes      []scanReport `json:"processes"`
 	}
 	out, err := json.Marshal(response{
 		ScannedAt:      time.Now().UTC(),

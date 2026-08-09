@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -127,30 +128,7 @@ func liveWatchHandler(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallTo
 	agg := &aggregate.Aggregator{}
 	var totalPackets int64
 	for pkt := range pktCh {
-		agg.Add(aggregate.PacketEvent{
-			SrcIP:         pkt.SrcIP,
-			DstIP:         pkt.DstIP,
-			SrcPort:       pkt.SrcPort,
-			DstPort:       pkt.DstPort,
-			Proto:         pkt.Proto,
-			PayloadLen:    pkt.PayloadLen,
-			Timestamp:     pkt.Timestamp,
-			DNSQuery:      pkt.DNSQuery,
-			TLSSNIName:    pkt.TLSSNIName,
-			JA3Hash:       pkt.JA3Hash,
-			IsQUIC:        pkt.IsQUIC,
-			IsHTTP2:       pkt.IsHTTP2,
-			IsGRPC:        pkt.IsGRPC,
-			DNSNXDomain:   pkt.DNSNXDomain,
-			DNSMinRespTTL: pkt.DNSMinRespTTL,
-			HTTPMethod:    pkt.HTTPMethod,
-			HTTPHost:      pkt.HTTPHost,
-			HTTPUserAgent: pkt.HTTPUserAgent,
-			HTTPURI:       pkt.HTTPURI,
-			TLSCertInfo:   pkt.TLSCertInfo,
-			IsIPv6RH0:     pkt.IsIPv6RH0,
-			IsIPv6Fragment: pkt.IsIPv6Fragment,
-		})
+		agg.Add(aggregate.FromCapturePacket(pkt, ifaceName))
 		totalPackets++
 	}
 
@@ -187,7 +165,9 @@ func liveWatchHandler(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallTo
 
 	// Persist to history so get_flow_history can find these flows later.
 	if len(allFlows) > 0 {
-		history.Append("watch:"+ifaceName, allFlows)
+		if err := history.Append("watch:"+ifaceName, allFlows); err != nil {
+			log.Printf("live_watch: persist history: %v", err)
+		}
 	}
 
 	type watchInfo struct {
@@ -202,9 +182,9 @@ func liveWatchHandler(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallTo
 		Timestamp     time.Time `json:"timestamp"`
 	}
 	type response struct {
-		WatchInfo watchInfo              `json:"watch_info"`
-		RiskSummary aggregate.RiskSummary `json:"risk_summary"`
-		Flows      []aggregate.FlowRecord `json:"flows"`
+		WatchInfo   watchInfo              `json:"watch_info"`
+		RiskSummary aggregate.RiskSummary  `json:"risk_summary"`
+		Flows       []aggregate.FlowRecord `json:"flows"`
 	}
 
 	var flows []aggregate.FlowRecord

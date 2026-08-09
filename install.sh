@@ -127,8 +127,9 @@ RELEASE_JSON="$(curl -fsSL -H "User-Agent: mcp-flowsentinel-installer" \
 
 VERSION="$(echo "$RELEASE_JSON" | grep '"tag_name"' | sed -E 's/.*"tag_name": *"([^"]+)".*/\1/')"
 DOWNLOAD_URL="$(echo "$RELEASE_JSON" | grep "browser_download_url" | grep "$ASSET\"" | sed -E 's/.*"browser_download_url": *"([^"]+)".*/\1/')"
+CHECKSUM_URL="$(echo "$RELEASE_JSON" | grep "browser_download_url" | grep 'SHA256SUMS.txt"' | sed -E 's/.*"browser_download_url": *"([^"]+)".*/\1/')"
 
-if [[ -z "$VERSION" || -z "$DOWNLOAD_URL" ]]; then
+if [[ -z "$VERSION" || -z "$DOWNLOAD_URL" || -z "$CHECKSUM_URL" ]]; then
     fail "Could not parse release info. Check your internet connection."
     info "API response: $RELEASE_JSON"
     exit 1
@@ -139,7 +140,29 @@ ok "Latest release: $VERSION"
 step "Downloading $ASSET ($VERSION)..."
 
 TMP_BIN="$(mktemp)"
+TMP_SUMS="$(mktemp)"
+trap 'rm -f "$TMP_BIN" "$TMP_SUMS"' EXIT
 curl -fsSL --progress-bar -o "$TMP_BIN" "$DOWNLOAD_URL"
+curl -fsSL -o "$TMP_SUMS" "$CHECKSUM_URL"
+
+EXPECTED_SHA256="$(awk -v asset="$ASSET" '$2 == asset || $2 == "*" asset {print tolower($1); exit}' "$TMP_SUMS")"
+if [[ ! "$EXPECTED_SHA256" =~ ^[0-9a-f]{64}$ ]]; then
+    fail "No valid SHA-256 checksum found for $ASSET."
+    exit 1
+fi
+if command -v sha256sum &>/dev/null; then
+    ACTUAL_SHA256="$(sha256sum "$TMP_BIN" | awk '{print tolower($1)}')"
+elif command -v shasum &>/dev/null; then
+    ACTUAL_SHA256="$(shasum -a 256 "$TMP_BIN" | awk '{print tolower($1)}')"
+else
+    fail "Neither sha256sum nor shasum is available; refusing an unverified install."
+    exit 1
+fi
+if [[ "$ACTUAL_SHA256" != "$EXPECTED_SHA256" ]]; then
+    fail "SHA-256 verification failed; the downloaded binary was not installed."
+    exit 1
+fi
+ok "SHA-256 checksum verified."
 chmod +x "$TMP_BIN"
 
 # Verify it runs

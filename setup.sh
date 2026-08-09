@@ -15,7 +15,8 @@ die()     { echo -e "${RED}ERROR${NC} $*" >&2; exit 1; }
 
 BINARY="mcp-flowsentinel"
 MIN_GO_MAJOR=1
-MIN_GO_MINOR=22
+MIN_GO_MINOR=25
+MIN_GO_PATCH=12
 
 # ─── OS detection ─────────────────────────────────────────────────────────────
 OS="$(uname -s)"
@@ -81,8 +82,8 @@ fi
 
 # ─── Step 2: Check / install Go ──────────────────────────────────────────────
 install_go() {
-    info "Installing Go ${MIN_GO_MAJOR}.${MIN_GO_MINOR}+..."
-    local GO_VERSION="1.24.0"
+    info "Installing Go ${MIN_GO_MAJOR}.${MIN_GO_MINOR}.${MIN_GO_PATCH}+..."
+    local GO_VERSION="1.25.12"
     local GOARCH
     case "${ARCH}" in
         x86_64|amd64)  GOARCH="amd64" ;;
@@ -94,7 +95,7 @@ install_go() {
     case "${OS}" in
         Linux)  GOOS="linux" ;;
         Darwin) GOOS="darwin" ;;
-        *)      die "Cannot auto-install Go on ${OS}. Please install Go ${MIN_GO_MAJOR}.${MIN_GO_MINOR}+ manually." ;;
+        *)      die "Cannot auto-install Go on ${OS}. Please install Go ${MIN_GO_MAJOR}.${MIN_GO_MINOR}.${MIN_GO_PATCH}+ manually." ;;
     esac
 
     local TARBALL="go${GO_VERSION}.${GOOS}-${GOARCH}.tar.gz"
@@ -129,12 +130,16 @@ check_go_version() {
 
     local VER
     VER="$(go version | awk '{print $3}' | sed 's/go//')"
-    local MAJ MIN
+    local MAJ MIN PATCH
     MAJ="$(echo "${VER}" | cut -d. -f1)"
     MIN="$(echo "${VER}" | cut -d. -f2)"
+    PATCH="$(echo "${VER}" | cut -d. -f3 | sed 's/[^0-9].*//')"
+    PATCH="${PATCH:-0}"
 
     if [ "${MAJ}" -gt "${MIN_GO_MAJOR}" ] || \
-       { [ "${MAJ}" -eq "${MIN_GO_MAJOR}" ] && [ "${MIN}" -ge "${MIN_GO_MINOR}" ]; }; then
+       { [ "${MAJ}" -eq "${MIN_GO_MAJOR}" ] && \
+         { [ "${MIN}" -gt "${MIN_GO_MINOR}" ] || \
+           { [ "${MIN}" -eq "${MIN_GO_MINOR}" ] && [ "${PATCH}" -ge "${MIN_GO_PATCH}" ]; }; }; }; then
         return 0
     fi
     return 1
@@ -143,10 +148,10 @@ check_go_version() {
 if check_go_version; then
     success "Go $(go version | awk '{print $3}') found."
 else
-    warn "Go not found or version < ${MIN_GO_MAJOR}.${MIN_GO_MINOR}."
+    warn "Go not found or version < ${MIN_GO_MAJOR}.${MIN_GO_MINOR}.${MIN_GO_PATCH}."
     install_go
     if ! check_go_version; then
-        die "Go installation failed. Please install Go ${MIN_GO_MAJOR}.${MIN_GO_MINOR}+ manually from https://go.dev/dl/"
+        die "Go installation failed. Please install Go ${MIN_GO_MAJOR}.${MIN_GO_MINOR}.${MIN_GO_PATCH}+ manually from https://go.dev/dl/"
     fi
 fi
 

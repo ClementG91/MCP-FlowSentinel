@@ -4,9 +4,21 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
+
+	"gopkg.in/yaml.v3"
 )
+
+func writeConfigYAML(t *testing.T, contents string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	return path
+}
 
 func TestDefault_AllFieldsPopulated(t *testing.T) {
 	cfg := Default()
@@ -23,6 +35,10 @@ func TestDefault_AllFieldsPopulated(t *testing.T) {
 	if cfg.Capture.MaxDurationSec != 60 {
 		t.Errorf("MaxDurationSec = %d, want 60", cfg.Capture.MaxDurationSec)
 	}
+	if cfg.Capture.DNSCacheTTLSec != 300 || cfg.Capture.PacketBufferSize != 4096 {
+		t.Errorf("capture operational defaults = ttl:%d buffer:%d, want 300 and 4096",
+			cfg.Capture.DNSCacheTTLSec, cfg.Capture.PacketBufferSize)
+	}
 	if cfg.History.MaxAgeHours != 24 {
 		t.Errorf("MaxAgeHours = %d, want 24", cfg.History.MaxAgeHours)
 	}
@@ -31,6 +47,71 @@ func TestDefault_AllFieldsPopulated(t *testing.T) {
 	}
 	if cfg.Daemon.CaptureIntervalSec != 300 {
 		t.Errorf("CaptureIntervalSec = %d, want 300", cfg.Daemon.CaptureIntervalSec)
+	}
+}
+
+func TestDefault_SecureOperationalDefaults(t *testing.T) {
+	cfg := Default()
+	if cfg.History.MaxRotatedDays != 7 {
+		t.Errorf("MaxRotatedDays = %d, want 7", cfg.History.MaxRotatedDays)
+	}
+	if cfg.Metrics.ListenAddr != "127.0.0.1:9200" {
+		t.Errorf("metrics listen address = %q, want loopback default", cfg.Metrics.ListenAddr)
+	}
+}
+
+func TestLoad_RejectsUnknownFields(t *testing.T) {
+	_, err := Load(writeConfigYAML(t, "capture:\n  dns_workerz: 20\n"))
+	if err == nil || !strings.Contains(err.Error(), "dns_workerz") {
+		t.Fatalf("expected unknown-field error, got %v", err)
+	}
+}
+
+func TestLoad_PreservesExplicitZeroAndEmptyLists(t *testing.T) {
+	cfg, err := Load(writeConfigYAML(t, `alerting:
+  min_score_threshold: 0
+  max_alerts_per_minute: 0
+history:
+  max_rotated_days: 0
+ja3_feed:
+  urls: []
+ip_rep:
+  urls: []
+dom_rep:
+  urls: []
+`))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Alerting.MinScoreThreshold != 0 || cfg.Alerting.MaxAlertsPerMinute != 0 {
+		t.Fatalf("explicit zero alert settings were lost: %+v", cfg.Alerting)
+	}
+	if cfg.History.MaxRotatedDays != 0 {
+		t.Fatalf("explicit unlimited rotated history was lost: %d", cfg.History.MaxRotatedDays)
+	}
+	if len(cfg.JA3Feed.URLs) != 0 || len(cfg.IPRep.URLs) != 0 || len(cfg.DomRep.URLs) != 0 {
+		t.Fatalf("explicit empty feed lists were replaced by defaults: ja3=%v ip=%v dom=%v",
+			cfg.JA3Feed.URLs, cfg.IPRep.URLs, cfg.DomRep.URLs)
+	}
+}
+
+func TestLoad_RejectsOutOfRangePortsAndTTL(t *testing.T) {
+	tests := []struct {
+		name string
+		yaml string
+		want string
+	}{
+		{name: "negative bad port", yaml: "scoring:\n  extra_bad_ports: [-1]\n", want: "extra_bad_ports"},
+		{name: "overflowing standard port", yaml: "scoring:\n  extra_standard_ports: [65536]\n", want: "extra_standard_ports"},
+		{name: "unreasonable TTL", yaml: "scoring:\n  fast_flux_ttl_threshold: 86401\n", want: "fast_flux_ttl_threshold"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := Load(writeConfigYAML(t, tt.yaml))
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("expected %q validation error, got %v", tt.want, err)
+			}
+		})
 	}
 }
 
@@ -316,6 +397,34 @@ func TestWriteDefault_CreatesFile(t *testing.T) {
 	}
 	if len(data) == 0 {
 		t.Error("WriteDefault produced empty file")
+	}
+}
+
+func TestDefaultYAMLDocumentsEveryConfigField(t *testing.T) {
+	var document map[string]any
+	if err := yaml.Unmarshal([]byte(defaultYAML), &document); err != nil {
+		t.Fatalf("default YAML is invalid: %v", err)
+	}
+
+	configType := reflect.TypeOf(Config{})
+	for i := 0; i < configType.NumField(); i++ {
+		sectionField := configType.Field(i)
+		sectionName := strings.Split(sectionField.Tag.Get("yaml"), ",")[0]
+		section, ok := document[sectionName].(map[string]any)
+		if !ok {
+			t.Errorf("default YAML is missing section %q", sectionName)
+			continue
+		}
+		for j := 0; j < sectionField.Type.NumField(); j++ {
+			field := sectionField.Type.Field(j)
+			name := strings.Split(field.Tag.Get("yaml"), ",")[0]
+			if name == "" || name == "-" {
+				continue
+			}
+			if _, ok := section[name]; !ok {
+				t.Errorf("default YAML is missing %s.%s", sectionName, name)
+			}
+		}
 	}
 }
 

@@ -7,6 +7,7 @@
 package config
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -37,9 +38,9 @@ type Config struct {
 // ScoringConfig controls every detection-engine threshold.
 type ScoringConfig struct {
 	// Beaconing
-	BeaconingStrongCV    float64 `yaml:"beaconing_strong_cv"`
-	BeaconingPossibleCV  float64 `yaml:"beaconing_possible_cv"`
-	BeaconingMinPackets  int     `yaml:"beaconing_min_packets"`
+	BeaconingStrongCV   float64 `yaml:"beaconing_strong_cv"`
+	BeaconingPossibleCV float64 `yaml:"beaconing_possible_cv"`
+	BeaconingMinPackets int     `yaml:"beaconing_min_packets"`
 	// BeaconingMinIntervalSec suppresses beaconing detection for flows whose
 	// mean inter-packet interval is shorter than this threshold (seconds).
 	// Useful to silence sub-100ms polling loops (NTP, MQTT) that have low CV
@@ -94,21 +95,21 @@ type ScoringConfig struct {
 	AsymmetricUploadRatio float64 `yaml:"asymmetric_upload_ratio"`
 
 	// Kill-switches — set to true to silence a noisy signal entirely.
-	DisableBinaryPathScoring       bool `yaml:"disable_binary_path_scoring"`
-	DisableCmdlineScoring          bool `yaml:"disable_cmdline_scoring"`
-	DisablePortScoring             bool `yaml:"disable_port_scoring"`
-	DisableBeaconingScoring        bool `yaml:"disable_beaconing_scoring"`
-	DisableDNSExfilScoring         bool `yaml:"disable_dns_exfil_scoring"`
-	DisableGeoScoring              bool `yaml:"disable_geo_scoring"`
-	DisableJA3Scoring              bool `yaml:"disable_ja3_scoring"`
-	DisableReverseDNSScoring       bool `yaml:"disable_reverse_dns_scoring"`
-	DisableSNIScoring              bool `yaml:"disable_sni_scoring"`
-	DisableQUICScoring             bool `yaml:"disable_quic_scoring"`
-	DisableLateralMovementScoring  bool `yaml:"disable_lateral_movement_scoring"`
-	DisableProtocolAnomalyScoring  bool `yaml:"disable_protocol_anomaly_scoring"`
-	DisableAsymmetricScoring       bool `yaml:"disable_asymmetric_scoring"`
-	DisableHTTPScoring             bool `yaml:"disable_http_scoring"`
-	DisableCertScoring             bool `yaml:"disable_cert_scoring"`
+	DisableBinaryPathScoring      bool `yaml:"disable_binary_path_scoring"`
+	DisableCmdlineScoring         bool `yaml:"disable_cmdline_scoring"`
+	DisablePortScoring            bool `yaml:"disable_port_scoring"`
+	DisableBeaconingScoring       bool `yaml:"disable_beaconing_scoring"`
+	DisableDNSExfilScoring        bool `yaml:"disable_dns_exfil_scoring"`
+	DisableGeoScoring             bool `yaml:"disable_geo_scoring"`
+	DisableJA3Scoring             bool `yaml:"disable_ja3_scoring"`
+	DisableReverseDNSScoring      bool `yaml:"disable_reverse_dns_scoring"`
+	DisableSNIScoring             bool `yaml:"disable_sni_scoring"`
+	DisableQUICScoring            bool `yaml:"disable_quic_scoring"`
+	DisableLateralMovementScoring bool `yaml:"disable_lateral_movement_scoring"`
+	DisableProtocolAnomalyScoring bool `yaml:"disable_protocol_anomaly_scoring"`
+	DisableAsymmetricScoring      bool `yaml:"disable_asymmetric_scoring"`
+	DisableHTTPScoring            bool `yaml:"disable_http_scoring"`
+	DisableCertScoring            bool `yaml:"disable_cert_scoring"`
 
 	// CompiledExtraCmdlinePatterns holds compiled versions of ExtraCmdlinePatterns.
 	// Populated automatically after config load. Not serialized — use this
@@ -175,10 +176,10 @@ type DaemonConfig struct {
 	// Interface is kept for backward compatibility. If Interfaces is empty
 	// and Interface is non-empty, the daemon uses Interface as a single-element
 	// list. Prefer Interfaces for new configurations.
-	Interface  string   `yaml:"interface"`
-	Interfaces []string `yaml:"interfaces"`
-	BPFFilter  string   `yaml:"bpf_filter"`
-	CaptureIntervalSec int `yaml:"capture_interval_seconds"`
+	Interface          string   `yaml:"interface"`
+	Interfaces         []string `yaml:"interfaces"`
+	BPFFilter          string   `yaml:"bpf_filter"`
+	CaptureIntervalSec int      `yaml:"capture_interval_seconds"`
 }
 
 // JA3FeedConfig controls the dynamic JA3 threat-intel feed.
@@ -247,7 +248,7 @@ type MetricsConfig struct {
 	// Enabled controls whether the /metrics HTTP server is started. Default: false.
 	// When false, no port is opened and no prometheus dependency is initialised.
 	Enabled bool `yaml:"enabled"`
-	// ListenAddr is the TCP address for the metrics endpoint. Default: ":9200".
+	// ListenAddr is the TCP address for the metrics endpoint. Default: "127.0.0.1:9200".
 	ListenAddr string `yaml:"listen_addr"`
 }
 
@@ -275,12 +276,15 @@ func Default() *Config {
 			MaxDurationSec:     60,
 			DNSTimeoutMS:       200,
 			DNSWorkers:         20,
+			DNSCacheTTLSec:     300,
+			PacketBufferSize:   4096,
 		},
 		GeoIP: GeoIPConfig{},
 		History: HistoryConfig{
-			MaxSizeMB:    50,
-			MaxAgeHours:  24,
-			PruneToHours: 12,
+			MaxSizeMB:      50,
+			MaxAgeHours:    24,
+			PruneToHours:   12,
+			MaxRotatedDays: 7,
 		},
 		Alerting: AlertingConfig{
 			MinScoreThreshold:      7.0,
@@ -319,7 +323,7 @@ func Default() *Config {
 		},
 		Metrics: MetricsConfig{
 			Enabled:    false,
-			ListenAddr: ":9200",
+			ListenAddr: "127.0.0.1:9200",
 		},
 	}
 	// Default() is called with empty ExtraCmdlinePatterns so this never errors.
@@ -674,10 +678,55 @@ func Load(path string) (*Config, error) {
 	}
 
 	var override Config
-	if err := yaml.Unmarshal(data, &override); err != nil {
+	decoder := yaml.NewDecoder(bytes.NewReader(data))
+	decoder.KnownFields(true)
+	if err := decoder.Decode(&override); err != nil {
 		return nil, fmt.Errorf("parse config %s: %w", path, err)
 	}
 	mergeOverDefaults(cfg, &override)
+
+	// Preserve explicit zero and empty-list values whose documented meaning is
+	// different from an omitted YAML field. The main merge intentionally treats
+	// zero values as absent to preserve defaults for partial configurations.
+	var explicit struct {
+		History struct {
+			MaxRotatedDays *int `yaml:"max_rotated_days"`
+		} `yaml:"history"`
+		Alerting struct {
+			MinScoreThreshold  *float64 `yaml:"min_score_threshold"`
+			MaxAlertsPerMinute *int     `yaml:"max_alerts_per_minute"`
+		} `yaml:"alerting"`
+		JA3Feed struct {
+			URLs *[]string `yaml:"urls"`
+		} `yaml:"ja3_feed"`
+		IPRep struct {
+			URLs *[]string `yaml:"urls"`
+		} `yaml:"ip_rep"`
+		DomRep struct {
+			URLs *[]string `yaml:"urls"`
+		} `yaml:"dom_rep"`
+	}
+	if err := yaml.Unmarshal(data, &explicit); err != nil {
+		return nil, fmt.Errorf("parse explicit config values %s: %w", path, err)
+	}
+	if explicit.History.MaxRotatedDays != nil {
+		cfg.History.MaxRotatedDays = *explicit.History.MaxRotatedDays
+	}
+	if explicit.Alerting.MinScoreThreshold != nil {
+		cfg.Alerting.MinScoreThreshold = *explicit.Alerting.MinScoreThreshold
+	}
+	if explicit.Alerting.MaxAlertsPerMinute != nil {
+		cfg.Alerting.MaxAlertsPerMinute = *explicit.Alerting.MaxAlertsPerMinute
+	}
+	if explicit.JA3Feed.URLs != nil {
+		cfg.JA3Feed.URLs = *explicit.JA3Feed.URLs
+	}
+	if explicit.IPRep.URLs != nil {
+		cfg.IPRep.URLs = *explicit.IPRep.URLs
+	}
+	if explicit.DomRep.URLs != nil {
+		cfg.DomRep.URLs = *explicit.DomRep.URLs
+	}
 
 	if err := validate(cfg); err != nil {
 		return nil, fmt.Errorf("invalid config %s: %w", path, err)
@@ -740,6 +789,19 @@ func validate(cfg *Config) error {
 	if s.DNSEntropyThreshold <= 0 {
 		return fmt.Errorf("scoring.dns_entropy_threshold must be > 0, got %v", s.DNSEntropyThreshold)
 	}
+	if s.FastFluxTTLThreshold <= 0 || s.FastFluxTTLThreshold > 86400 {
+		return fmt.Errorf("scoring.fast_flux_ttl_threshold must be in [1, 86400], got %d", s.FastFluxTTLThreshold)
+	}
+	for name, ports := range map[string][]int{
+		"scoring.extra_bad_ports":      s.ExtraBadPorts,
+		"scoring.extra_standard_ports": s.ExtraStandardPorts,
+	} {
+		for _, port := range ports {
+			if port < 1 || port > 65535 {
+				return fmt.Errorf("%s entries must be in [1, 65535], got %d", name, port)
+			}
+		}
+	}
 	if s.ScanConfirmedDests <= s.ScanPossibleDests {
 		return fmt.Errorf("scoring.scan_confirmed_destinations (%d) must be greater than scan_possible_destinations (%d)", s.ScanConfirmedDests, s.ScanPossibleDests)
 	}
@@ -759,6 +821,9 @@ func validate(cfg *Config) error {
 	if c.DNSCacheTTLSec < 0 {
 		return fmt.Errorf("capture.dns_cache_ttl_seconds must be >= 0, got %d", c.DNSCacheTTLSec)
 	}
+	if c.PacketBufferSize != 0 && (c.PacketBufferSize < 256 || c.PacketBufferSize > 65536) {
+		return fmt.Errorf("capture.packet_buffer_size must be 0 or in [256, 65536], got %d", c.PacketBufferSize)
+	}
 	h := cfg.History
 	if h.MaxSizeMB <= 0 {
 		return fmt.Errorf("history.max_size_mb must be > 0, got %d", h.MaxSizeMB)
@@ -769,6 +834,9 @@ func validate(cfg *Config) error {
 	if h.PruneToHours <= 0 || h.PruneToHours >= h.MaxAgeHours {
 		return fmt.Errorf("history.prune_to_hours (%d) must be in (0, max_age_hours=%d)", h.PruneToHours, h.MaxAgeHours)
 	}
+	if h.MaxRotatedDays < 0 {
+		return fmt.Errorf("history.max_rotated_days must be >= 0, got %d", h.MaxRotatedDays)
+	}
 	if cfg.Daemon.CaptureIntervalSec <= 0 {
 		return fmt.Errorf("daemon.capture_interval_seconds must be > 0, got %d", cfg.Daemon.CaptureIntervalSec)
 	}
@@ -778,6 +846,9 @@ func validate(cfg *Config) error {
 	}
 	if a.DeduplicationWindowSec < 0 {
 		return fmt.Errorf("alerting.deduplication_window_seconds must be >= 0, got %d", a.DeduplicationWindowSec)
+	}
+	if a.MaxAlertsPerMinute < 0 {
+		return fmt.Errorf("alerting.max_alerts_per_minute must be >= 0, got %d", a.MaxAlertsPerMinute)
 	}
 	return nil
 }
@@ -812,6 +883,7 @@ scoring:
   beaconing_strong_cv: 0.15     # CV < this → strong beaconing   (+3.5 pts)
   beaconing_possible_cv: 0.30   # CV < this → possible beaconing  (+2.0 pts)
   beaconing_min_packets: 5      # Minimum packets required for statistical validity
+  beaconing_min_interval_seconds: 0  # Ignore shorter intervals (0 = disabled)
 
   # DNS exfiltration — high-entropy subdomain detection.
   dns_entropy_threshold: 3.5    # Shannon entropy (bits/char) above this → suspicious (+2.5 pts)
@@ -823,38 +895,46 @@ scoring:
 
   # ── Custom port lists (additive — merged with built-in lists) ──────────────
   # Add ports you want flagged as suspicious (append to built-in bad-port list).
-  # extra_bad_ports: [8888, 9999]
+  extra_bad_ports: []            # Example: [8888, 9999]
 
   # Add ports that are normal in your environment to reduce false positives.
   # Common additions: 3000 (Node), 5000 (Flask), 8000 (Django), 9200 (ES)
-  # extra_standard_ports: [3000, 5000, 8000, 9200]
+  extra_standard_ports: []       # Example: [3000, 5000, 8000, 9200]
 
   # ── Custom suspicious path prefixes (additive) ────────────────────────────
-  # extra_suspicious_paths:
+  extra_suspicious_paths: []
+  # Example:
   #   - "/opt/implants/"
   #   - "C:\\Users\\Public\\"
 
   # ── Custom cmdline patterns — Go regex syntax (additive) ──────────────────
-  # extra_cmdline_patterns:
+  extra_cmdline_patterns: []
+  # Example:
   #   - "(?i)mshta\\.exe"
   #   - "(?i)regsvr32.*scrobj"
 
   # ── Custom high-risk ASN patterns — case-insensitive substring (additive) ─
-  # extra_high_risk_asns:
+  extra_high_risk_asns: []
+  # Example:
   #   - "my-bad-hoster"
 
   # ── Custom JA3 bad hashes (additive) ────────────────────────────────────
   # Format: "hash" or "hash:description"
-  # extra_ja3_bad_hashes:
+  extra_ja3_bad_hashes: []
+  # Example:
   #   - "abc123def456abc123def456abc123de:My red-team tool"
   #   - "deadbeef00112233deadbeef00112233"
 
   # ── Process exemptions (skip beaconing + binary-path scoring) ─────────────
   # Useful for cron jobs, monitoring agents, build systems.
-  # exempted_processes:
+  exempted_processes: []
+  # Example:
   #   - "prometheus"
   #   - "node_exporter"
   #   - "datadog-agent"
+
+  # Additional process names that should receive developer-tool noise masking.
+  dev_tool_processes: []
 
   # ── DNS response analysis ─────────────────────────────────────────────────
   # Flag flows with >= N NXDOMAIN responses (DGA/C2 storm indicator).
@@ -892,6 +972,10 @@ scoring:
   disable_protocol_anomaly_scoring: false
   # Disable asymmetric upload ratio detection.
   disable_asymmetric_scoring: false
+  # Disable HTTP method, User-Agent, and URI scoring.
+  disable_http_scoring: false
+  # Disable TLS certificate anomaly scoring.
+  disable_cert_scoring: false
 
 # ─── Capture Timing ───────────────────────────────────────────────────────────
 capture:
@@ -900,6 +984,7 @@ capture:
   dns_timeout_ms: 200            # Per-IP reverse-DNS lookup timeout
   dns_workers: 20                # Concurrent goroutines for reverse-DNS resolution
   dns_cache_ttl_seconds: 300     # How long PTR results are cached (takes effect on restart)
+  packet_buffer_size: 4096       # Packet event channel capacity (256–65536)
 
 # ─── GeoIP Enrichment (optional) ─────────────────────────────────────────────
 # Download free databases from https://dev.maxmind.com/geoip/geolite2-free-geolocation-data
@@ -913,13 +998,15 @@ history:
   max_size_mb: 50       # File size cap; aggressive pruning kicks in above this
   max_age_hours: 24     # Entries older than this are always discarded
   prune_to_hours: 12    # When file is oversized, keep only the last N hours
+  compress_rotated: false  # Compress older daily history segments with gzip
+  max_rotated_days: 7     # Retain compressed segments for N days (0 = unlimited)
 
 # ─── Webhook Alerting ─────────────────────────────────────────────────────────
 # Sends a JSON POST when a flow's suspicion score crosses the threshold.
 # Supports generic HTTP endpoints, Slack incoming webhooks, and Discord webhooks.
 alerting:
   enabled: false
-  # webhook_url: "https://hooks.slack.com/services/T.../B.../..."
+  webhook_url: ""                      # Example: https://hooks.slack.com/services/...
   min_score_threshold: 7.0              # Only alert on CRITICAL flows (score >= 7.0)
   deduplication_window_seconds: 300     # Suppress repeat alerts for the same flow within this window
   max_alerts_per_minute: 60            # Rate limit — caps webhook POST rate (0 = unlimited)
@@ -929,7 +1016,8 @@ alerting:
 # Used when running: mcp-flowsentinel --daemon
 daemon:
   interface: ""                    # Single interface (legacy — prefer interfaces list below)
-  # interfaces:                    # Monitor multiple interfaces in parallel
+  interfaces: []                    # Monitor multiple interfaces in parallel
+  # Example:
   #   - "eth0"
   #   - "eth1"
   #   - "docker0"
@@ -952,7 +1040,8 @@ ja3_feed:
 hassh_feed:
   enabled: false
   update_interval_hours: 24
-  # urls:
+  urls: []
+  # Example:
   #   - "https://example.com/hassh_blacklist.csv"
   local_file: ""   # Optional path to local CSV (hash,description)
 
@@ -967,9 +1056,23 @@ ip_rep:
     - "https://rules.emergingthreats.net/fwrules/emerging-Block-IPs.txt"
   local_file: ""   # Optional local file (one IP or CIDR per line)
 
+# ─── Domain Reputation ────────────────────────────────────────────────────────
+# Matches DNS queries and TLS SNI against URLhaus, ThreatFox, or custom lists.
+dom_rep:
+  enabled: false
+  update_interval_hours: 24
+  urls:
+    - "https://urlhaus.abuse.ch/downloads/text/"
+    - "https://threatfox.abuse.ch/export/csv/domains/recent/"
+  local_file: ""   # Optional local file (one URL or domain per line)
+
+# ─── External Threat Intelligence ─────────────────────────────────────────────
+intel:
+  virustotal_api_key: ""  # Enables hash-only VirusTotal lookups in scan_process
+
 # ─── Prometheus Metrics ────────────────────────────────────────────────────────
 # Exposes a /metrics endpoint for Prometheus scraping.
 metrics:
   enabled: false        # Set true to start the metrics HTTP server
-  listen_addr: ":9200"  # Address and port for the Prometheus scrape endpoint
+  listen_addr: "127.0.0.1:9200"  # Loopback-only by default; opt in explicitly to remote exposure
 `

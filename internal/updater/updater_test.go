@@ -3,6 +3,8 @@ package updater
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -11,13 +13,18 @@ import (
 	"testing"
 )
 
+func testChecksum(data []byte) string {
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:])
+}
+
 func TestVersionEqual(t *testing.T) {
 	tests := []struct {
 		a, b string
 		want bool
 	}{
 		{"v1.2.3", "v1.2.3", true},
-		{"1.2.3", "v1.2.3", true},  // leading "v" is ignored
+		{"1.2.3", "v1.2.3", true}, // leading "v" is ignored
 		{"v1.2.3", "1.2.3", true},
 		{"1.2.3", "1.2.3", true},
 		{"v1.2.3", "v1.2.4", false},
@@ -133,7 +140,7 @@ func TestDownloadReplace_InvalidRequestURL_ReturnsError(t *testing.T) {
 	if err := os.WriteFile(dst, []byte("old"), 0o755); err != nil {
 		t.Fatalf("pre-create: %v", err)
 	}
-	err := downloadReplace(context.Background(), "://\x00invalid", dst)
+	err := downloadReplace(context.Background(), "://\x00invalid", dst, testChecksum(nil))
 	if err == nil {
 		t.Error("expected error for invalid download URL")
 	}
@@ -160,6 +167,35 @@ func TestLatestRelease_WithGitHubToken_SendsHeader(t *testing.T) {
 	}
 }
 
+func TestFetchExpectedChecksum(t *testing.T) {
+	assetName := "mcp-flowsentinel-linux-amd64"
+	expected := testChecksum([]byte("binary"))
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(expected + "  " + assetName + "\n"))
+	}))
+	defer srv.Close()
+	got, err := fetchExpectedChecksum(context.Background(), srv.URL, assetName)
+	if err != nil {
+		t.Fatalf("fetchExpectedChecksum: %v", err)
+	}
+	if got != expected {
+		t.Fatalf("checksum = %q, want %q", got, expected)
+	}
+}
+
+func TestFetchExpectedChecksum_RejectsMissingOrMalformedDigest(t *testing.T) {
+	for _, body := range []string{"", "not-a-sha256  binary\n"} {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			_, _ = w.Write([]byte(body))
+		}))
+		_, err := fetchExpectedChecksum(context.Background(), srv.URL, "binary")
+		srv.Close()
+		if err == nil {
+			t.Fatalf("expected checksum error for %q", body)
+		}
+	}
+}
+
 // ─── downloadReplace ─────────────────────────────────────────────────────────
 
 func TestDownloadReplace_Success(t *testing.T) {
@@ -176,7 +212,7 @@ func TestDownloadReplace_Success(t *testing.T) {
 		t.Fatalf("pre-create dst: %v", err)
 	}
 
-	if err := downloadReplace(context.Background(), srv.URL, dst); err != nil {
+	if err := downloadReplace(context.Background(), srv.URL, dst, testChecksum(content)); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
@@ -189,6 +225,28 @@ func TestDownloadReplace_Success(t *testing.T) {
 	}
 }
 
+func TestDownloadReplace_ChecksumMismatchPreservesDestination(t *testing.T) {
+	content := []byte("untrusted replacement")
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write(content)
+	}))
+	defer srv.Close()
+	dst := filepath.Join(t.TempDir(), "testbin")
+	if err := os.WriteFile(dst, []byte("trusted original"), 0o755); err != nil {
+		t.Fatalf("write destination: %v", err)
+	}
+	if err := downloadReplace(context.Background(), srv.URL, dst, testChecksum([]byte("different"))); err == nil {
+		t.Fatal("expected checksum mismatch")
+	}
+	got, err := os.ReadFile(dst)
+	if err != nil {
+		t.Fatalf("read destination: %v", err)
+	}
+	if string(got) != "trusted original" {
+		t.Fatalf("destination changed after checksum failure: %q", got)
+	}
+}
+
 func TestDownloadReplace_HTTP404_ReturnsError(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
@@ -196,7 +254,7 @@ func TestDownloadReplace_HTTP404_ReturnsError(t *testing.T) {
 	defer srv.Close()
 
 	dst := filepath.Join(t.TempDir(), "testbin")
-	if err := downloadReplace(context.Background(), srv.URL, dst); err == nil {
+	if err := downloadReplace(context.Background(), srv.URL, dst, testChecksum(nil)); err == nil {
 		t.Error("expected error for HTTP 404 download")
 	}
 }
@@ -222,13 +280,13 @@ func TestDownloadReplace_BodyReadError_ReturnsError(t *testing.T) {
 		t.Fatalf("pre-create: %v", err)
 	}
 
-	err := downloadReplace(context.Background(), srv.URL, dst)
+	err := downloadReplace(context.Background(), srv.URL, dst, testChecksum([]byte("partial")))
 	// May or may not fail depending on buffering; we just verify no panic.
 	t.Logf("downloadReplace body-error result: %v", err)
 }
 
 func TestDownloadReplace_InvalidURL_ReturnsError(t *testing.T) {
-	err := downloadReplace(context.Background(), "http://127.0.0.1:0/unreachable", filepath.Join(t.TempDir(), "bin"))
+	err := downloadReplace(context.Background(), "http://127.0.0.1:0/unreachable", filepath.Join(t.TempDir(), "bin"), testChecksum(nil))
 	if err == nil {
 		t.Error("expected error for unreachable URL")
 	}

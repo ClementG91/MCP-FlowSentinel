@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -103,23 +104,14 @@ func analyzePcapHandler(ctx context.Context, req mcp.CallToolRequest) (*mcp.Call
 	agg := &aggregate.Aggregator{}
 	var totalPackets int64
 	for pkt := range pktCh {
-		agg.Add(aggregate.PacketEvent{
-			SrcIP:      pkt.SrcIP,
-			DstIP:      pkt.DstIP,
-			SrcPort:    pkt.SrcPort,
-			DstPort:    pkt.DstPort,
-			Proto:      pkt.Proto,
-			PayloadLen: pkt.PayloadLen,
-			Timestamp:  pkt.Timestamp,
-			DNSQuery:   pkt.DNSQuery,
-			TLSSNIName: pkt.TLSSNIName,
-			JA3Hash:    pkt.JA3Hash,
-		})
+		agg.Add(aggregate.FromCapturePacket(pkt, ""))
 		totalPackets++
 	}
 
 	allFlows := agg.Finalize(resolver, nil)
-	history.Append("pcap:"+filePath, allFlows)
+	if err := history.Append("pcap:"+filePath, allFlows); err != nil {
+		log.Printf("analyze_pcap: persist history: %v", err)
+	}
 	summary := aggregate.Summarise(allFlows)
 	flows := aggregate.FilterOptions{MinScore: minScore, TopN: topN}.Apply(allFlows)
 
@@ -135,8 +127,8 @@ func analyzePcapHandler(ctx context.Context, req mcp.CallToolRequest) (*mcp.Call
 		Timestamp     time.Time `json:"timestamp"`
 	}
 	type response struct {
-		CaptureInfo captureInfo           `json:"capture_info"`
-		RiskSummary aggregate.RiskSummary `json:"risk_summary"`
+		CaptureInfo captureInfo            `json:"capture_info"`
+		RiskSummary aggregate.RiskSummary  `json:"risk_summary"`
 		Flows       []aggregate.FlowRecord `json:"flows"`
 	}
 

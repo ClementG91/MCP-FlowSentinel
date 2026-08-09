@@ -1,6 +1,6 @@
 module github.com/ClementG91/MCP-FlowSentinel
 
-go 1.25.9
+go 1.25.12
 
 require (
 	github.com/google/gopacket v1.1.19
@@ -24,5 +24,6 @@ require (
 	github.com/yosida95/uritemplate/v3 v3.0.2 // indirect
 	github.com/yusufpapurcu/wmi v1.2.4 // indirect
 	go4.org/netipx v0.0.0-20231129151722-fdeea329fbba // indirect
-	golang.org/x/sys v0.38.0 // indirect
+	golang.org/x/net v0.57.0 // indirect
+	golang.org/x/sys v0.47.0 // indirect
 )

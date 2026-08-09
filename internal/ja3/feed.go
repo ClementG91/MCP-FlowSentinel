@@ -37,8 +37,8 @@ type feedCache struct {
 }
 
 var (
-	feedMu      sync.RWMutex
-	feedEntries map[string]feedEntry // lower-case hash → entry
+	feedMu        sync.RWMutex
+	feedEntries   map[string]feedEntry // lower-case hash → entry
 	feedCachePath string
 )
 
@@ -231,7 +231,7 @@ func saveFeedToDisk(entries map[string]feedEntry) {
 		log.Printf("ja3feed: marshal error: %v", err)
 		return
 	}
-	if err := os.WriteFile(feedCachePath, data, 0o640); err != nil {
+	if err := os.WriteFile(feedCachePath, data, 0o600); err != nil {
 		log.Printf("ja3feed: write cache %q: %v", feedCachePath, err)
 	}
 }
@@ -256,8 +256,6 @@ func loadFeedFromDisk() {
 	feedMu.Lock()
 	feedEntries = m
 	feedMu.Unlock()
-	log.Printf("ja3feed: restored %d entries from disk cache (updated %s ago)",
-		len(m), time.Since(cache.UpdatedAt).Round(time.Minute))
 }
 
 // sourceLabel returns a short human-readable label for a URL.

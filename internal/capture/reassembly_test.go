@@ -34,13 +34,13 @@ func buildTLSClientHello(sni string) []byte {
 	// cipher_suites_len(2) + cipher_suites(2) + compression_methods_len(1) +
 	// compression_methods(1) + extensions_len(2) + extensions
 	hello := make([]byte, 0, 64)
-	hello = append(hello, 0x03, 0x03)             // TLS 1.2
-	hello = append(hello, make([]byte, 32)...)     // random
-	hello = append(hello, 0x00)                    // session_id_length = 0
-	hello = append(hello, 0x00, 0x02)              // cipher_suites_length = 2
-	hello = append(hello, 0x00, 0x2F)              // TLS_RSA_WITH_AES_128_CBC_SHA
-	hello = append(hello, 0x01, 0x00)              // compression_methods_length=1, null
-	hello = append(hello, 0x00, byte(len(ext)))    // extensions_length
+	hello = append(hello, 0x03, 0x03)           // TLS 1.2
+	hello = append(hello, make([]byte, 32)...)  // random
+	hello = append(hello, 0x00)                 // session_id_length = 0
+	hello = append(hello, 0x00, 0x02)           // cipher_suites_length = 2
+	hello = append(hello, 0x00, 0x2F)           // TLS_RSA_WITH_AES_128_CBC_SHA
+	hello = append(hello, 0x01, 0x00)           // compression_methods_length=1, null
+	hello = append(hello, 0x00, byte(len(ext))) // extensions_length
 	hello = append(hello, ext...)
 
 	// Handshake header: type(1) + length(3)
@@ -234,4 +234,3 @@ func TestStreamReassembler_MultipleStreams(t *testing.T) {
 		t.Errorf("did not receive SNI %q", sni2)
 	}
 }
-

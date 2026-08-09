@@ -12,7 +12,7 @@
 package ja3
 
 import (
-	"crypto/md5"
+	"crypto/md5" // #nosec G501 -- JA3S compatibility requires the protocol-defined MD5 digest.
 	"encoding/hex"
 	"fmt"
 	"strings"
@@ -70,7 +70,7 @@ func computeJA3S(sh serverHello) string {
 		sh.cipher,
 		joinUint16(sh.extensions),
 	)
-	sum := md5.Sum([]byte(s))
+	sum := md5.Sum([]byte(s)) // #nosec G401 -- JA3S compatibility requires the protocol-defined MD5 digest.
 	return hex.EncodeToString(sum[:])
 }
 

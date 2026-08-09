@@ -4,6 +4,8 @@ package updater
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -16,8 +18,11 @@ import (
 )
 
 const (
-	repo    = "ClementG91/MCP-FlowSentinel"
-	timeout = 30 * time.Second
+	repo                = "ClementG91/MCP-FlowSentinel"
+	timeout             = 30 * time.Second
+	maxBinarySize       = 100 << 20
+	maxChecksumFileSize = 1 << 20
+	maxReleaseJSONSize  = 4 << 20
 )
 
 // apiBase is a var so tests can point it at an httptest.Server.
@@ -78,6 +83,15 @@ func CheckAndUpdate(currentVersion string) error {
 			assetName, release.TagName, repo)
 	}
 
+	checksumAsset := findAsset(release.Assets, "SHA256SUMS.txt")
+	if checksumAsset == nil {
+		return fmt.Errorf("release %s has no SHA256SUMS.txt asset; refusing an unverified update", release.TagName)
+	}
+	expectedSHA256, err := fetchExpectedChecksum(ctx, checksumAsset.BrowserDownloadURL, assetName)
+	if err != nil {
+		return fmt.Errorf("cannot verify release asset: %w", err)
+	}
+
 	fmt.Printf("\nDownloading %s ...\n", assetName)
 
 	exePath, err := os.Executable()
@@ -89,12 +103,57 @@ func CheckAndUpdate(currentVersion string) error {
 		return fmt.Errorf("cannot resolve symlinks: %w", err)
 	}
 
-	if err := downloadReplace(ctx, target.BrowserDownloadURL, exePath); err != nil {
+	if err := downloadReplace(ctx, target.BrowserDownloadURL, exePath, expectedSHA256); err != nil {
 		return fmt.Errorf("update failed: %w", err)
 	}
 
 	fmt.Printf("\nUpdated to %s. Restart the MCP server to apply.\n", release.TagName)
 	return nil
+}
+
+func findAsset(assets []Asset, name string) *Asset {
+	for i := range assets {
+		if assets[i].Name == name {
+			return &assets[i]
+		}
+	}
+	return nil
+}
+
+func fetchExpectedChecksum(ctx context.Context, src, assetName string) (string, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, src, nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("User-Agent", "mcp-flowsentinel-updater")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("checksum download returned HTTP %d", resp.StatusCode)
+	}
+	data, err := io.ReadAll(io.LimitReader(resp.Body, maxChecksumFileSize+1))
+	if err != nil {
+		return "", fmt.Errorf("read checksum file: %w", err)
+	}
+	if len(data) > maxChecksumFileSize {
+		return "", fmt.Errorf("checksum file exceeds %d bytes", maxChecksumFileSize)
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 2 || strings.TrimPrefix(fields[len(fields)-1], "*") != assetName {
+			continue
+		}
+		checksum := strings.ToLower(fields[0])
+		decoded, err := hex.DecodeString(checksum)
+		if err != nil || len(decoded) != sha256.Size {
+			return "", fmt.Errorf("invalid SHA-256 checksum for %s", assetName)
+		}
+		return checksum, nil
+	}
+	return "", fmt.Errorf("SHA-256 checksum for %s not found", assetName)
 }
 
 // latestRelease calls the GitHub API and returns the latest release.
@@ -120,16 +179,23 @@ func latestRelease(ctx context.Context) (*Release, error) {
 		return nil, fmt.Errorf("GitHub API returned HTTP %d", resp.StatusCode)
 	}
 
+	data, err := io.ReadAll(io.LimitReader(resp.Body, maxReleaseJSONSize+1))
+	if err != nil {
+		return nil, fmt.Errorf("read API response: %w", err)
+	}
+	if len(data) > maxReleaseJSONSize {
+		return nil, fmt.Errorf("GitHub API response exceeds %d bytes", maxReleaseJSONSize)
+	}
 	var r Release
-	if err := json.NewDecoder(resp.Body).Decode(&r); err != nil {
+	if err := json.Unmarshal(data, &r); err != nil {
 		return nil, fmt.Errorf("malformed API response: %w", err)
 	}
 	return &r, nil
 }
 
-// downloadReplace downloads src, writes it to a temp file beside dst, then
-// atomically renames it over dst.
-func downloadReplace(ctx context.Context, src, dst string) error {
+// downloadReplace downloads src, verifies its SHA-256 digest, writes it to a
+// temp file beside dst, then atomically renames it over dst.
+func downloadReplace(ctx context.Context, src, dst, expectedSHA256 string) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, src, nil)
 	if err != nil {
 		return err
@@ -145,6 +211,9 @@ func downloadReplace(ctx context.Context, src, dst string) error {
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("download returned HTTP %d", resp.StatusCode)
 	}
+	if resp.ContentLength > maxBinarySize {
+		return fmt.Errorf("download is %d bytes, limit is %d", resp.ContentLength, maxBinarySize)
+	}
 
 	// Write to a temp file in the same directory so the rename is atomic.
 	dir := filepath.Dir(dst)
@@ -159,12 +228,23 @@ func downloadReplace(ctx context.Context, src, dst string) error {
 		os.Remove(tmpName)
 	}()
 
-	const maxBinarySize = 100 << 20 // 100 MB — guard against infinite/huge responses
-	if _, err := io.Copy(tmp, io.LimitReader(resp.Body, maxBinarySize)); err != nil {
+	hasher := sha256.New()
+	written, err := io.Copy(io.MultiWriter(tmp, hasher), io.LimitReader(resp.Body, maxBinarySize+1))
+	if err != nil {
 		return fmt.Errorf("download interrupted: %w", err)
 	}
+	if written > maxBinarySize {
+		return fmt.Errorf("download exceeds %d bytes", maxBinarySize)
+	}
+	actualSHA256 := hex.EncodeToString(hasher.Sum(nil))
+	if !strings.EqualFold(actualSHA256, expectedSHA256) {
+		return fmt.Errorf("SHA-256 mismatch: got %s, want %s", actualSHA256, expectedSHA256)
+	}
+	if err := tmp.Sync(); err != nil {
+		return fmt.Errorf("sync downloaded binary: %w", err)
+	}
 	if err := tmp.Close(); err != nil {
-		return err
+		return fmt.Errorf("close downloaded binary: %w", err)
 	}
 
 	// Make executable.
@@ -176,10 +256,19 @@ func downloadReplace(ctx context.Context, src, dst string) error {
 	// Rename the old binary to a .old file first, then rename the new one.
 	if runtime.GOOS == "windows" {
 		oldPath := dst + ".old"
-		_ = os.Remove(oldPath) // ignore error if it doesn't exist
+		if err := os.Remove(oldPath); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("remove previous backup: %w", err)
+		}
 		if err := os.Rename(dst, oldPath); err != nil {
 			return fmt.Errorf("cannot move old binary: %w", err)
 		}
+		if err := os.Rename(tmpName, dst); err != nil {
+			if restoreErr := os.Rename(oldPath, dst); restoreErr != nil {
+				return fmt.Errorf("cannot replace binary: %w (also failed to restore old binary: %v)", err, restoreErr)
+			}
+			return fmt.Errorf("cannot replace binary: %w (old binary restored)", err)
+		}
+		return nil
 	}
 
 	if err := os.Rename(tmpName, dst); err != nil {

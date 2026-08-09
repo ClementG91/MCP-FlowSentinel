@@ -1,10 +1,10 @@
 # =============================================================================
-#  MCP-FlowSentinel — Windows One-liner Installer
+#  MCP-FlowSentinel - Windows One-liner Installer
 #  Usage:  irm https://raw.githubusercontent.com/ClementG91/MCP-FlowSentinel/main/install.ps1 | iex
 #       OR: .\install.ps1
 # =============================================================================
 #  What this does:
-#   1. Checks for Npcap (required runtime — cannot auto-install, proprietary)
+#   1. Checks for Npcap (required runtime - cannot auto-install, proprietary)
 #   2. Downloads the latest pre-built binary from GitHub Releases
 #   3. Places it in %LOCALAPPDATA%\FlowSentinel\
 #   4. Adds the install dir to your PATH (user scope)
@@ -16,7 +16,7 @@ $Repo       = "ClementG91/MCP-FlowSentinel"
 $BinaryName = "mcp-flowsentinel.exe"
 $InstallDir = Join-Path $env:LOCALAPPDATA "FlowSentinel"
 
-# ── Helpers ──────────────────────────────────────────────────────────────────
+# -- Helpers -----------------------------------------------------------------
 function Write-Step { param($m) Write-Host "`n==> $m" -ForegroundColor Cyan }
 function Write-Ok   { param($m) Write-Host "  [OK]   $m" -ForegroundColor Green }
 function Write-Warn { param($m) Write-Host "  [WARN] $m" -ForegroundColor Yellow }
@@ -28,7 +28,7 @@ Write-Host "  MCP-FlowSentinel Installer" -ForegroundColor Cyan
 Write-Host "  https://github.com/$Repo" -ForegroundColor DarkGray
 Write-Host ""
 
-# ── Step 1: Npcap check ──────────────────────────────────────────────────────
+# -- Step 1: Npcap check ------------------------------------------------------
 Write-Step "Checking Npcap (required for packet capture)..."
 
 $npcapOk = $false
@@ -60,23 +60,23 @@ if (-not $npcapOk) {
     }
 }
 
-# ── Step 2: Detect architecture ──────────────────────────────────────────────
+# -- Step 2: Detect architecture ---------------------------------------------
 Write-Step "Detecting architecture..."
 $arch = $env:PROCESSOR_ARCHITECTURE
 if ($arch -eq "AMD64" -or $arch -eq "EM64T") {
     $assetName = "mcp-flowsentinel-windows-amd64.exe"
     Write-Ok "x86_64 (amd64) detected."
 } elseif ($arch -eq "ARM64") {
-    # No ARM64 Windows binary yet — fallback with warning
+    # No ARM64 Windows binary yet - fallback with warning
     $assetName = "mcp-flowsentinel-windows-amd64.exe"
-    Write-Warn "ARM64 detected — using amd64 binary (requires x64 emulation, enabled by default on Windows 11)."
+    Write-Warn "ARM64 detected - using amd64 binary (requires x64 emulation, enabled by default on Windows 11)."
 } else {
     Write-Fail "Unsupported architecture: $arch"
     Write-Info "Please open an issue: https://github.com/$Repo/issues"
     exit 1
 }
 
-# ── Step 3: Get latest release ───────────────────────────────────────────────
+# -- Step 3: Get latest release ----------------------------------------------
 Write-Step "Fetching latest release from GitHub..."
 try {
     $headers = @{ "User-Agent" = "mcp-flowsentinel-installer" }
@@ -97,8 +97,13 @@ if (-not $asset) {
     Write-Info "Please open an issue: https://github.com/$Repo/issues"
     exit 1
 }
+$checksumAsset = $release.assets | Where-Object { $_.name -eq "SHA256SUMS.txt" } | Select-Object -First 1
+if (-not $checksumAsset) {
+    Write-Fail "SHA256SUMS.txt not found in release $version; refusing an unverified install."
+    exit 1
+}
 
-# ── Step 4: Download ─────────────────────────────────────────────────────────
+# -- Step 4: Download ---------------------------------------------------------
 Write-Step "Downloading $assetName ($version)..."
 if (-not (Test-Path $InstallDir)) {
     New-Item -ItemType Directory -Path $InstallDir | Out-Null
@@ -108,14 +113,32 @@ $BinaryPath = Join-Path $InstallDir $BinaryName
 try {
     $tmp = [System.IO.Path]::GetTempFileName() + ".exe"
     Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $tmp -UseBasicParsing
+    $checksumResponse = Invoke-WebRequest -Uri $checksumAsset.browser_download_url -UseBasicParsing
+    $expectedHash = $null
+    foreach ($line in ($checksumResponse.Content -split "`n")) {
+        $fields = $line.Trim() -split "\s+"
+        if ($fields.Count -ge 2 -and $fields[-1].TrimStart("*") -eq $assetName) {
+            $expectedHash = $fields[0]
+            break
+        }
+    }
+    if (-not $expectedHash -or $expectedHash -notmatch "^[0-9a-fA-F]{64}$") {
+        throw "No valid SHA-256 checksum found for $assetName"
+    }
+    $actualHash = (Get-FileHash -Path $tmp -Algorithm SHA256).Hash
+    if ($actualHash -ine $expectedHash) {
+        throw "SHA-256 verification failed; the downloaded binary was not installed"
+    }
+    Write-Ok "SHA-256 checksum verified."
     Move-Item -Path $tmp -Destination $BinaryPath -Force
     Write-Ok "Downloaded to: $BinaryPath"
 } catch {
+    if ($tmp -and (Test-Path $tmp)) { Remove-Item -LiteralPath $tmp -Force }
     Write-Fail "Download failed: $_"
     exit 1
 }
 
-# ── Step 5: Add to PATH ───────────────────────────────────────────────────────
+# -- Step 5: Add to PATH ------------------------------------------------------
 Write-Step "Adding to PATH (user scope)..."
 $userPath = [Environment]::GetEnvironmentVariable("PATH", "User")
 if ($userPath -notlike "*$InstallDir*") {
@@ -127,7 +150,7 @@ if ($userPath -notlike "*$InstallDir*") {
     Write-Ok "PATH already contains '$InstallDir'."
 }
 
-# ── Step 6: Quick sanity check ────────────────────────────────────────────────
+# -- Step 6: Quick sanity check ----------------------------------------------
 Write-Step "Verifying binary..."
 try {
     $v = & $BinaryPath --version 2>&1
@@ -136,7 +159,7 @@ try {
     Write-Warn "Could not run --version: $_"
 }
 
-# ── Step 7: Configure Claude Desktop ─────────────────────────────────────────
+# -- Step 7: Configure Claude Desktop ----------------------------------------
 Write-Step "Configuring Claude Desktop..."
 
 $claudeConfDir  = Join-Path $env:APPDATA "Claude"
@@ -151,7 +174,7 @@ if (Test-Path $claudeConfFile) {
         $config = Get-Content $claudeConfFile -Raw | ConvertFrom-Json
         Write-Info "Existing config found."
     } catch {
-        Write-Warn "Existing config unreadable — starting fresh."
+        Write-Warn "Existing config unreadable - starting fresh."
         $config = [PSCustomObject]@{}
     }
 } else {
@@ -169,7 +192,7 @@ $config.mcpServers | Add-Member -MemberType NoteProperty -Name "flowsentinel" -V
 $config | ConvertTo-Json -Depth 10 | Set-Content $claudeConfFile -Encoding UTF8
 Write-Ok "Claude Desktop configured: $claudeConfFile"
 
-# ── Done ─────────────────────────────────────────────────────────────────────
+# -- Done --------------------------------------------------------------------
 Write-Host ""
 Write-Host "  ============================================" -ForegroundColor Green
 Write-Host "   MCP-FlowSentinel $version installed!" -ForegroundColor Green

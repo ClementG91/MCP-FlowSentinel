@@ -24,7 +24,7 @@ import (
 type CertInfo struct {
 	IsSelfSigned  bool
 	IsExpired     bool
-	ValidityDays  int    // total lifetime in days
+	ValidityDays  int // total lifetime in days
 	SubjectCN     string
 	IssuerCN      string
 	NotBefore     time.Time
