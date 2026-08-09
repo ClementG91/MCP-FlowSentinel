@@ -7,6 +7,7 @@
 package config
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -37,9 +38,9 @@ type Config struct {
 // ScoringConfig controls every detection-engine threshold.
 type ScoringConfig struct {
 	// Beaconing
-	BeaconingStrongCV    float64 `yaml:"beaconing_strong_cv"`
-	BeaconingPossibleCV  float64 `yaml:"beaconing_possible_cv"`
-	BeaconingMinPackets  int     `yaml:"beaconing_min_packets"`
+	BeaconingStrongCV   float64 `yaml:"beaconing_strong_cv"`
+	BeaconingPossibleCV float64 `yaml:"beaconing_possible_cv"`
+	BeaconingMinPackets int     `yaml:"beaconing_min_packets"`
 	// BeaconingMinIntervalSec suppresses beaconing detection for flows whose
 	// mean inter-packet interval is shorter than this threshold (seconds).
 	// Useful to silence sub-100ms polling loops (NTP, MQTT) that have low CV
@@ -94,21 +95,21 @@ type ScoringConfig struct {
 	AsymmetricUploadRatio float64 `yaml:"asymmetric_upload_ratio"`
 
 	// Kill-switches — set to true to silence a noisy signal entirely.
-	DisableBinaryPathScoring       bool `yaml:"disable_binary_path_scoring"`
-	DisableCmdlineScoring          bool `yaml:"disable_cmdline_scoring"`
-	DisablePortScoring             bool `yaml:"disable_port_scoring"`
-	DisableBeaconingScoring        bool `yaml:"disable_beaconing_scoring"`
-	DisableDNSExfilScoring         bool `yaml:"disable_dns_exfil_scoring"`
-	DisableGeoScoring              bool `yaml:"disable_geo_scoring"`
-	DisableJA3Scoring              bool `yaml:"disable_ja3_scoring"`
-	DisableReverseDNSScoring       bool `yaml:"disable_reverse_dns_scoring"`
-	DisableSNIScoring              bool `yaml:"disable_sni_scoring"`
-	DisableQUICScoring             bool `yaml:"disable_quic_scoring"`
-	DisableLateralMovementScoring  bool `yaml:"disable_lateral_movement_scoring"`
-	DisableProtocolAnomalyScoring  bool `yaml:"disable_protocol_anomaly_scoring"`
-	DisableAsymmetricScoring       bool `yaml:"disable_asymmetric_scoring"`
-	DisableHTTPScoring             bool `yaml:"disable_http_scoring"`
-	DisableCertScoring             bool `yaml:"disable_cert_scoring"`
+	DisableBinaryPathScoring      bool `yaml:"disable_binary_path_scoring"`
+	DisableCmdlineScoring         bool `yaml:"disable_cmdline_scoring"`
+	DisablePortScoring            bool `yaml:"disable_port_scoring"`
+	DisableBeaconingScoring       bool `yaml:"disable_beaconing_scoring"`
+	DisableDNSExfilScoring        bool `yaml:"disable_dns_exfil_scoring"`
+	DisableGeoScoring             bool `yaml:"disable_geo_scoring"`
+	DisableJA3Scoring             bool `yaml:"disable_ja3_scoring"`
+	DisableReverseDNSScoring      bool `yaml:"disable_reverse_dns_scoring"`
+	DisableSNIScoring             bool `yaml:"disable_sni_scoring"`
+	DisableQUICScoring            bool `yaml:"disable_quic_scoring"`
+	DisableLateralMovementScoring bool `yaml:"disable_lateral_movement_scoring"`
+	DisableProtocolAnomalyScoring bool `yaml:"disable_protocol_anomaly_scoring"`
+	DisableAsymmetricScoring      bool `yaml:"disable_asymmetric_scoring"`
+	DisableHTTPScoring            bool `yaml:"disable_http_scoring"`
+	DisableCertScoring            bool `yaml:"disable_cert_scoring"`
 
 	// CompiledExtraCmdlinePatterns holds compiled versions of ExtraCmdlinePatterns.
 	// Populated automatically after config load. Not serialized — use this
@@ -175,10 +176,10 @@ type DaemonConfig struct {
 	// Interface is kept for backward compatibility. If Interfaces is empty
 	// and Interface is non-empty, the daemon uses Interface as a single-element
 	// list. Prefer Interfaces for new configurations.
-	Interface  string   `yaml:"interface"`
-	Interfaces []string `yaml:"interfaces"`
-	BPFFilter  string   `yaml:"bpf_filter"`
-	CaptureIntervalSec int `yaml:"capture_interval_seconds"`
+	Interface          string   `yaml:"interface"`
+	Interfaces         []string `yaml:"interfaces"`
+	BPFFilter          string   `yaml:"bpf_filter"`
+	CaptureIntervalSec int      `yaml:"capture_interval_seconds"`
 }
 
 // JA3FeedConfig controls the dynamic JA3 threat-intel feed.
@@ -247,7 +248,7 @@ type MetricsConfig struct {
 	// Enabled controls whether the /metrics HTTP server is started. Default: false.
 	// When false, no port is opened and no prometheus dependency is initialised.
 	Enabled bool `yaml:"enabled"`
-	// ListenAddr is the TCP address for the metrics endpoint. Default: ":9200".
+	// ListenAddr is the TCP address for the metrics endpoint. Default: "127.0.0.1:9200".
 	ListenAddr string `yaml:"listen_addr"`
 }
 
@@ -278,9 +279,10 @@ func Default() *Config {
 		},
 		GeoIP: GeoIPConfig{},
 		History: HistoryConfig{
-			MaxSizeMB:    50,
-			MaxAgeHours:  24,
-			PruneToHours: 12,
+			MaxSizeMB:      50,
+			MaxAgeHours:    24,
+			PruneToHours:   12,
+			MaxRotatedDays: 7,
 		},
 		Alerting: AlertingConfig{
 			MinScoreThreshold:      7.0,
@@ -319,7 +321,7 @@ func Default() *Config {
 		},
 		Metrics: MetricsConfig{
 			Enabled:    false,
-			ListenAddr: ":9200",
+			ListenAddr: "127.0.0.1:9200",
 		},
 	}
 	// Default() is called with empty ExtraCmdlinePatterns so this never errors.
@@ -674,10 +676,55 @@ func Load(path string) (*Config, error) {
 	}
 
 	var override Config
-	if err := yaml.Unmarshal(data, &override); err != nil {
+	decoder := yaml.NewDecoder(bytes.NewReader(data))
+	decoder.KnownFields(true)
+	if err := decoder.Decode(&override); err != nil {
 		return nil, fmt.Errorf("parse config %s: %w", path, err)
 	}
 	mergeOverDefaults(cfg, &override)
+
+	// Preserve explicit zero and empty-list values whose documented meaning is
+	// different from an omitted YAML field. The main merge intentionally treats
+	// zero values as absent to preserve defaults for partial configurations.
+	var explicit struct {
+		History struct {
+			MaxRotatedDays *int `yaml:"max_rotated_days"`
+		} `yaml:"history"`
+		Alerting struct {
+			MinScoreThreshold  *float64 `yaml:"min_score_threshold"`
+			MaxAlertsPerMinute *int     `yaml:"max_alerts_per_minute"`
+		} `yaml:"alerting"`
+		JA3Feed struct {
+			URLs *[]string `yaml:"urls"`
+		} `yaml:"ja3_feed"`
+		IPRep struct {
+			URLs *[]string `yaml:"urls"`
+		} `yaml:"ip_rep"`
+		DomRep struct {
+			URLs *[]string `yaml:"urls"`
+		} `yaml:"dom_rep"`
+	}
+	if err := yaml.Unmarshal(data, &explicit); err != nil {
+		return nil, fmt.Errorf("parse explicit config values %s: %w", path, err)
+	}
+	if explicit.History.MaxRotatedDays != nil {
+		cfg.History.MaxRotatedDays = *explicit.History.MaxRotatedDays
+	}
+	if explicit.Alerting.MinScoreThreshold != nil {
+		cfg.Alerting.MinScoreThreshold = *explicit.Alerting.MinScoreThreshold
+	}
+	if explicit.Alerting.MaxAlertsPerMinute != nil {
+		cfg.Alerting.MaxAlertsPerMinute = *explicit.Alerting.MaxAlertsPerMinute
+	}
+	if explicit.JA3Feed.URLs != nil {
+		cfg.JA3Feed.URLs = *explicit.JA3Feed.URLs
+	}
+	if explicit.IPRep.URLs != nil {
+		cfg.IPRep.URLs = *explicit.IPRep.URLs
+	}
+	if explicit.DomRep.URLs != nil {
+		cfg.DomRep.URLs = *explicit.DomRep.URLs
+	}
 
 	if err := validate(cfg); err != nil {
 		return nil, fmt.Errorf("invalid config %s: %w", path, err)
@@ -759,6 +806,9 @@ func validate(cfg *Config) error {
 	if c.DNSCacheTTLSec < 0 {
 		return fmt.Errorf("capture.dns_cache_ttl_seconds must be >= 0, got %d", c.DNSCacheTTLSec)
 	}
+	if c.PacketBufferSize != 0 && (c.PacketBufferSize < 256 || c.PacketBufferSize > 65536) {
+		return fmt.Errorf("capture.packet_buffer_size must be 0 or in [256, 65536], got %d", c.PacketBufferSize)
+	}
 	h := cfg.History
 	if h.MaxSizeMB <= 0 {
 		return fmt.Errorf("history.max_size_mb must be > 0, got %d", h.MaxSizeMB)
@@ -769,6 +819,9 @@ func validate(cfg *Config) error {
 	if h.PruneToHours <= 0 || h.PruneToHours >= h.MaxAgeHours {
 		return fmt.Errorf("history.prune_to_hours (%d) must be in (0, max_age_hours=%d)", h.PruneToHours, h.MaxAgeHours)
 	}
+	if h.MaxRotatedDays < 0 {
+		return fmt.Errorf("history.max_rotated_days must be >= 0, got %d", h.MaxRotatedDays)
+	}
 	if cfg.Daemon.CaptureIntervalSec <= 0 {
 		return fmt.Errorf("daemon.capture_interval_seconds must be > 0, got %d", cfg.Daemon.CaptureIntervalSec)
 	}
@@ -778,6 +831,9 @@ func validate(cfg *Config) error {
 	}
 	if a.DeduplicationWindowSec < 0 {
 		return fmt.Errorf("alerting.deduplication_window_seconds must be >= 0, got %d", a.DeduplicationWindowSec)
+	}
+	if a.MaxAlertsPerMinute < 0 {
+		return fmt.Errorf("alerting.max_alerts_per_minute must be >= 0, got %d", a.MaxAlertsPerMinute)
 	}
 	return nil
 }
@@ -971,5 +1027,5 @@ ip_rep:
 # Exposes a /metrics endpoint for Prometheus scraping.
 metrics:
   enabled: false        # Set true to start the metrics HTTP server
-  listen_addr: ":9200"  # Address and port for the Prometheus scrape endpoint
+  listen_addr: "127.0.0.1:9200"  # Loopback-only by default; opt in explicitly to remote exposure
 `

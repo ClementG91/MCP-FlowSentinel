@@ -82,7 +82,7 @@ fi
 # ─── Step 2: Check / install Go ──────────────────────────────────────────────
 install_go() {
     info "Installing Go ${MIN_GO_MAJOR}.${MIN_GO_MINOR}+..."
-    local GO_VERSION="1.24.0"
+    local GO_VERSION="1.25.12"
     local GOARCH
     case "${ARCH}" in
         x86_64|amd64)  GOARCH="amd64" ;;

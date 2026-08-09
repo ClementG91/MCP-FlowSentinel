@@ -97,6 +97,11 @@ if (-not $asset) {
     Write-Info "Please open an issue: https://github.com/$Repo/issues"
     exit 1
 }
+$checksumAsset = $release.assets | Where-Object { $_.name -eq "SHA256SUMS.txt" } | Select-Object -First 1
+if (-not $checksumAsset) {
+    Write-Fail "SHA256SUMS.txt not found in release $version; refusing an unverified install."
+    exit 1
+}
 
 # ── Step 4: Download ─────────────────────────────────────────────────────────
 Write-Step "Downloading $assetName ($version)..."
@@ -108,9 +113,27 @@ $BinaryPath = Join-Path $InstallDir $BinaryName
 try {
     $tmp = [System.IO.Path]::GetTempFileName() + ".exe"
     Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $tmp -UseBasicParsing
+    $checksumResponse = Invoke-WebRequest -Uri $checksumAsset.browser_download_url -UseBasicParsing
+    $expectedHash = $null
+    foreach ($line in ($checksumResponse.Content -split "`n")) {
+        $fields = $line.Trim() -split "\s+"
+        if ($fields.Count -ge 2 -and $fields[-1].TrimStart("*") -eq $assetName) {
+            $expectedHash = $fields[0]
+            break
+        }
+    }
+    if (-not $expectedHash -or $expectedHash -notmatch "^[0-9a-fA-F]{64}$") {
+        throw "No valid SHA-256 checksum found for $assetName"
+    }
+    $actualHash = (Get-FileHash -Path $tmp -Algorithm SHA256).Hash
+    if ($actualHash -ine $expectedHash) {
+        throw "SHA-256 verification failed; the downloaded binary was not installed"
+    }
+    Write-Ok "SHA-256 checksum verified."
     Move-Item -Path $tmp -Destination $BinaryPath -Force
     Write-Ok "Downloaded to: $BinaryPath"
 } catch {
+    if ($tmp -and (Test-Path $tmp)) { Remove-Item -LiteralPath $tmp -Force }
     Write-Fail "Download failed: $_"
     exit 1
 }

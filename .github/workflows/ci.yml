@@ -6,6 +6,9 @@ on:
   pull_request:
     branches: [main]
 
+permissions:
+  contents: read
+
 jobs:
   # ── Build + Test ─────────────────────────────────────────────────────────────
   test:
@@ -17,11 +20,11 @@ jobs:
         os: [ubuntu-latest, macos-latest, windows-latest]
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
-          go-version: "1.25"
+          go-version: "1.25.12"
           cache: true
 
       # ── Platform libpcap setup ─────────────────────────────────────────────
@@ -41,12 +44,18 @@ jobs:
         shell: pwsh
         run: |
           Invoke-WebRequest -Uri "https://npcap.com/dist/npcap-sdk-1.13.zip" -OutFile npcap-sdk.zip
+          $expected = "dad1f2bf1b02b787be08ca4862f99e39a876c1f274bac4ac0cedc9bbc58f94fd"
+          $actual = (Get-FileHash npcap-sdk.zip -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actual -ne $expected) { throw "Npcap SDK SHA-256 mismatch: $actual" }
           Expand-Archive npcap-sdk.zip -DestinationPath C:\npcap-sdk
           Add-Content $env:GITHUB_ENV "CGO_CFLAGS=-IC:\npcap-sdk\Include"
           Add-Content $env:GITHUB_ENV "CGO_LDFLAGS=-LC:\npcap-sdk\Lib\x64"
 
       - name: Download dependencies
         run: go mod download
+
+      - name: Verify module files are tidy
+        run: go mod tidy -diff
 
       # ── go vet (all platforms) ─────────────────────────────────────────────
       - name: go vet
@@ -61,24 +70,12 @@ jobs:
         if: runner.os != 'Windows'
         run: go test -race -coverprofile=coverage.out -covermode=atomic ./...
 
-      # ── Tests (Windows — exclude packages requiring the pcap runtime) ──────
-      # capture, daemon, and tools/analyze_network need the Npcap driver at
-      # runtime, which is not available on GitHub Windows runners.
+      # ── Tests (Windows) ────────────────────────────────────────────────────
+      # Offline PCAP/PCAPNG tests use the pure-Go reader and do not require the
+      # Npcap runtime. Live-capture entry points are not invoked by unit tests.
       - name: Test (Windows)
         if: runner.os == 'Windows'
-        run: >
-          go test
-          ./internal/aggregate/...
-          ./internal/alerting/...
-          ./internal/cache/...
-          ./internal/config/...
-          ./internal/correlate/...
-          ./internal/daemon/...
-          ./internal/history/...
-          ./internal/intel/...
-          ./internal/ja3/...
-          ./internal/tools/...
-          ./internal/updater/...
+        run: go test ./...
 
       # ── Coverage gate: fail if total < 70 % (Linux only) ──────────────────
       - name: Enforce coverage ≥ 70%
@@ -91,7 +88,7 @@ jobs:
 
       - name: Upload coverage report
         if: runner.os == 'Linux'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
           name: coverage-report
           path: coverage.out
@@ -102,27 +99,25 @@ jobs:
     name: staticcheck
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
-          go-version: "1.25"
+          go-version: "1.25.12"
           cache: true
       - name: Install libpcap
         run: sudo apt-get update -qq && sudo apt-get install -y libpcap-dev
-      - uses: dominikh/staticcheck-action@v1
-        with:
-          version: "latest"
-          install-go: false
+      - name: Run staticcheck
+        run: go run honnef.co/go/tools/cmd/staticcheck@v0.7.0 ./...
 
   # ── govulncheck — known CVEs in Go dependencies ───────────────────────────────
   govulncheck:
     name: govulncheck
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
-          go-version: "1.25"
+          go-version: "1.25.12"
           cache: true
       - name: Install libpcap
         run: sudo apt-get update -qq && sudo apt-get install -y libpcap-dev

@@ -17,7 +17,7 @@ Thanks for your interest! This project is community-driven and welcomes all kind
 
 ### Prerequisites
 
-- Go 1.22+
+- Go 1.25.12+
 - libpcap dev headers (see [README.md](README.md) for platform-specific instructions)
 - For Windows: Npcap SDK + GCC (run `build-windows.ps1` to auto-install)
 

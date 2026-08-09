@@ -130,6 +130,9 @@ func TestFire_AboveThreshold_PostsJSON(t *testing.T) {
 		if a.Flow.SuspicionScore != 8.5 {
 			t.Errorf("SuspicionScore = %v, want 8.5", a.Flow.SuspicionScore)
 		}
+		if a.Text == "" || a.Content == "" {
+			t.Errorf("expected Slack and Discord message fields, got text=%q content=%q", a.Text, a.Content)
+		}
 	case <-time.After(3 * time.Second):
 		t.Fatal("webhook not called within 3s")
 	}

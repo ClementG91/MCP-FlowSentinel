@@ -34,11 +34,11 @@ var (
 	flowsScored  atomic.Int64
 	windowErrors atomic.Int64
 
-	startTimeMu   sync.RWMutex
-	startTime     time.Time
-	activeIface   string
+	startTimeMu    sync.RWMutex
+	startTime      time.Time
+	activeIface    string
 	activeIfacesMu sync.RWMutex
-	activeIfaces  []string
+	activeIfaces   []string
 )
 
 // Stats holds a snapshot of the daemon's runtime metrics.
@@ -128,7 +128,7 @@ func Run(ctx context.Context) error {
 	if cfg.Metrics.Enabled {
 		addr := cfg.Metrics.ListenAddr
 		if addr == "" {
-			addr = ":9200"
+			addr = "127.0.0.1:9200"
 		}
 		metrics.Serve(addr)
 	}
@@ -311,32 +311,7 @@ func runWindow(ctx context.Context, ifaces []string, bpfFilter string, dur time.
 				return
 			}
 			for pkt := range pktCh {
-				agg.Add(aggregate.PacketEvent{
-					SrcIP:         pkt.SrcIP,
-					DstIP:         pkt.DstIP,
-					SrcPort:       pkt.SrcPort,
-					DstPort:       pkt.DstPort,
-					Proto:         pkt.Proto,
-					PayloadLen:    pkt.PayloadLen,
-					Timestamp:     pkt.Timestamp,
-					DNSQuery:      pkt.DNSQuery,
-					TLSSNIName:    pkt.TLSSNIName,
-					JA3Hash:       pkt.JA3Hash,
-					IsQUIC:        pkt.IsQUIC,
-					IsHTTP2:        pkt.IsHTTP2,
-					IsGRPC:         pkt.IsGRPC,
-					IsIPv6RH0:      pkt.IsIPv6RH0,
-					IsIPv6Fragment: pkt.IsIPv6Fragment,
-					DNSNXDomain:   pkt.DNSNXDomain,
-					DNSMinRespTTL: pkt.DNSMinRespTTL,
-					HTTPMethod:    pkt.HTTPMethod,
-					HTTPHost:      pkt.HTTPHost,
-					HTTPUserAgent: pkt.HTTPUserAgent,
-					HTTPURI:       pkt.HTTPURI,
-					TLSCertInfo:   pkt.TLSCertInfo,
-					JA3SHash:      pkt.JA3SHash,
-					HasshHash:     pkt.HasshHash,
-				})
+				agg.Add(aggregate.FromCapturePacket(pkt, ifaceName))
 			}
 		}(iface)
 	}
@@ -403,7 +378,9 @@ func runWindow(ctx context.Context, ifaces []string, bpfFilter string, dur time.
 	if len(ifaces) > 1 {
 		source = fmt.Sprintf("daemon:%d-interfaces", len(ifaces))
 	}
-	history.Append(source, flows)
+	if err := history.Append(source, flows); err != nil {
+		log.Printf("daemon: persist history: %v", err)
+	}
 	alerting.Fire(flows)
 
 	summary := aggregate.Summarise(flows)

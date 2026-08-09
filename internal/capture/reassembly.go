@@ -68,6 +68,7 @@ type tlsStream struct {
 	buf       []byte
 	done      bool // true after SNI has been extracted and emitted
 	out       chan<- PacketEvent
+	lastSeen  time.Time
 }
 
 // Reassembled is called by tcpassembly with each ordered, contiguous chunk
@@ -77,6 +78,9 @@ func (s *tlsStream) Reassembled(rs []tcpassembly.Reassembly) {
 		return
 	}
 	for _, r := range rs {
+		if r.Seen.After(s.lastSeen) {
+			s.lastSeen = r.Seen
+		}
 		if len(r.Bytes) == 0 {
 			continue
 		}
@@ -116,14 +120,15 @@ func (s *tlsStream) Reassembled(rs []tcpassembly.Reassembly) {
 	dstPort := binary.BigEndian.Uint16(dstRaw)
 
 	evt := PacketEvent{
-		SrcIP:      srcIP,
-		DstIP:      dstIP,
-		SrcPort:    srcPort,
-		DstPort:    dstPort,
-		Proto:      "TCP",
-		Timestamp:  time.Now(),
-		TLSSNIName: sni,
-		JA3Hash:    ja3.Fingerprint(s.buf),
+		SrcIP:          srcIP,
+		DstIP:          dstIP,
+		SrcPort:        srcPort,
+		DstPort:        dstPort,
+		Proto:          "TCP",
+		Timestamp:      s.lastSeen,
+		EnrichmentOnly: true,
+		TLSSNIName:     sni,
+		JA3Hash:        ja3.Fingerprint(s.buf),
 	}
 	// Non-blocking send — reassembly results are best-effort. If the channel
 	// is full (backpressure) we drop rather than block the assembler goroutine.

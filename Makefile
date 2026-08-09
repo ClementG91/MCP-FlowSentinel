@@ -19,8 +19,8 @@ all: check-deps build
 ##############################################################################
 
 check-deps:
-	@echo "==> Checking Go version (need ≥ 1.22)..."
-	@go version | awk '{split($$3,a,"go"); if (a[2]+0 < 1.22) {print "ERROR: Go 1.22+ required"; exit 1}}'
+	@echo "==> Checking Go version (need ≥ 1.25.12)..."
+	@go version | awk '{split($$3,a,"go"); if (a[2]+0 < 1.25) {print "ERROR: Go 1.25.12+ required"; exit 1}}'
 
 	@echo "==> Checking libpcap headers..."
 	@test -f /usr/include/pcap.h \

@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
 var (
@@ -65,7 +66,14 @@ func Serve(addr string) {
 			w.WriteHeader(http.StatusOK)
 			_, _ = w.Write([]byte("ok"))
 		})
-		srv := &http.Server{Addr: addr, Handler: mux}
+		srv := &http.Server{
+			Addr:              addr,
+			Handler:           mux,
+			ReadHeaderTimeout: 5 * time.Second,
+			ReadTimeout:       10 * time.Second,
+			WriteTimeout:      10 * time.Second,
+			IdleTimeout:       60 * time.Second,
+		}
 		go func() {
 			log.Printf("metrics: serving Prometheus metrics on http://%s/metrics", addr)
 			if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {

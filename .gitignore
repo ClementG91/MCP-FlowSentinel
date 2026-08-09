@@ -6,12 +6,28 @@ mcp-flowsentinel.exe.old
 
 # Build artifacts
 dist/
+*.test
+*.prof
+*.pprof
+*.trace
+*.tmp
+*.log
+npcap-sdk/
+npcap-sdk*.zip
 
 # IDE / editor
 .claude/
+.idea/
+.vscode/
 .DS_Store
 Thumbs.db
 ehthumbs.db
+
+# Local environment / secrets
+.env
+.env.*
+!.env.example
+*.local
 
 # Go test / coverage output
 *.out
