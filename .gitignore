@@ -2,16 +2,44 @@
 mcp-flowsentinel
 mcp-flowsentinel.exe
 mcp-flowsentinel.exe.old
+mcp-flowsentinel.old
 *.exe~
+*~
 
 # Build artifacts
 dist/
+*.test
+*.prof
+*.pprof
+*.trace
+*.tmp
+*.log
+npcap-sdk/
+npcap-sdk*.zip
+
+# Runtime data and local configuration
+/config.yaml
+*.jsonl
+*.jsonl.gz
+*.mmdb
+*.pcap
+*.pcapng
+!**/testdata/*.pcap
+!**/testdata/*.pcapng
 
 # IDE / editor
 .claude/
+.idea/
+.vscode/
 .DS_Store
 Thumbs.db
 ehthumbs.db
+
+# Local environment / secrets
+.env
+.env.*
+!.env.example
+*.local
 
 # Go test / coverage output
 *.out

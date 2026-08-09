@@ -207,7 +207,7 @@ func saveHasshFeedToDisk(entries map[string]hasshFeedEntry) {
 		log.Printf("hasshfeed: marshal error: %v", err)
 		return
 	}
-	if err := os.WriteFile(hasshFeedCachePath, data, 0o640); err != nil {
+	if err := os.WriteFile(hasshFeedCachePath, data, 0o600); err != nil {
 		log.Printf("hasshfeed: write cache %q: %v", hasshFeedCachePath, err)
 	}
 }
@@ -232,8 +232,6 @@ func loadHasshFeedFromDisk() {
 	hasshFeedMu.Lock()
 	hasshFeedEntries = m
 	hasshFeedMu.Unlock()
-	log.Printf("hasshfeed: restored %d entries from disk cache (updated %s ago)",
-		len(m), time.Since(cache.UpdatedAt).Round(time.Minute))
 }
 
 func hasshSourceLabel(url string) string {

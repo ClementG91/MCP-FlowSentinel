@@ -148,15 +148,18 @@ func buildSocketTable(cache *ProcCache) *SocketTable {
 	activePIDs := make(map[int32]struct{}, len(conns))
 
 	for _, c := range conns {
+		if c.Laddr.Port > 65535 || c.Raddr.Port > 65535 {
+			continue
+		}
 		activePIDs[c.Pid] = struct{}{}
 		info := resolveProcess(c.Pid, localCache)
 		proto := protoName(c.Type)
 
 		key := connKey{
 			localIP:    c.Laddr.IP,
-			localPort:  uint16(c.Laddr.Port),
+			localPort:  uint16(c.Laddr.Port), // #nosec G115 -- guarded above by the transport port range.
 			remoteIP:   c.Raddr.IP,
-			remotePort: uint16(c.Raddr.Port),
+			remotePort: uint16(c.Raddr.Port), // #nosec G115 -- guarded above by the transport port range.
 			proto:      proto,
 		}
 		t.byConn[key] = info

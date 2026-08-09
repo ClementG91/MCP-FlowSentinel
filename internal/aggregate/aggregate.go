@@ -75,16 +75,16 @@ func isPrivateIP(ipStr string) bool {
 // Traffic to these on standard HTTPS ports may indicate DNS tunneling or
 // covert channel use by processes that have no business performing DoH.
 var dohProviders = map[string]bool{
-	"dns.google":                 true,
-	"cloudflare-dns.com":         true,
+	"dns.google":                       true,
+	"cloudflare-dns.com":               true,
 	"1dot1dot1dot1.cloudflare-dns.com": true,
-	"dns.quad9.net":              true,
-	"dns9.quad9.net":             true,
-	"doh.opendns.com":            true,
-	"dns.nextdns.io":             true,
-	"doh.cleanbrowsing.org":      true,
-	"doh.xfinity.com":            true,
-	"mozilla.cloudflare-dns.com": true,
+	"dns.quad9.net":                    true,
+	"dns9.quad9.net":                   true,
+	"doh.opendns.com":                  true,
+	"dns.nextdns.io":                   true,
+	"doh.cleanbrowsing.org":            true,
+	"doh.xfinity.com":                  true,
+	"mozilla.cloudflare-dns.com":       true,
 }
 
 // ProcessSnapshot carries enriched process metadata from a single flow's owner.
@@ -101,12 +101,17 @@ type ProcessSnapshot struct {
 }
 
 // FlowKey is the canonical identifier for a unidirectional network flow.
-// We group by destination to keep server-side listening processes visible.
+// Source and destination ports are both required: omitting the source port
+// merges concurrent connections (and potentially different processes) that
+// happen to contact the same endpoint. Interface keeps multi-NIC captures
+// attributable to the interface on which they were observed.
 type FlowKey struct {
-	SrcIP   string
-	DstIP   string
-	DstPort uint16
-	Proto   string // "TCP" | "UDP"
+	SrcIP     string
+	DstIP     string
+	SrcPort   uint16
+	DstPort   uint16
+	Proto     string // "TCP" | "UDP"
+	Interface string
 }
 
 // FlowRecord is the final, enriched representation of a flow.
@@ -138,13 +143,13 @@ type FlowRecord struct {
 	TLSSNIName  string   `json:"tls_sni,omitempty"`
 	DNSQueries  []string `json:"dns_queries,omitempty"`
 	// JA3 / JA3S TLS fingerprinting
-	JA3Hash        string `json:"ja3_hash,omitempty"`         // MD5 of TLS ClientHello parameters (client fingerprint)
-	JA3KnownBad    string `json:"ja3_known_bad,omitempty"`    // malware family if ClientHello hash matches known-bad list
-	JA3SHash       string `json:"ja3s_hash,omitempty"`        // MD5 of TLS ServerHello parameters (server fingerprint)
-	JA3SKnownBad   string `json:"ja3s_known_bad,omitempty"`   // C2 server family if ServerHello hash matches known-bad list
+	JA3Hash      string `json:"ja3_hash,omitempty"`       // MD5 of TLS ClientHello parameters (client fingerprint)
+	JA3KnownBad  string `json:"ja3_known_bad,omitempty"`  // malware family if ClientHello hash matches known-bad list
+	JA3SHash     string `json:"ja3s_hash,omitempty"`      // MD5 of TLS ServerHello parameters (server fingerprint)
+	JA3SKnownBad string `json:"ja3s_known_bad,omitempty"` // C2 server family if ServerHello hash matches known-bad list
 	// SSH HASSH fingerprinting
-	HasshHash      string `json:"hassh_hash,omitempty"`       // MD5 of SSH_MSG_KEXINIT algorithm lists
-	HasshKnownBad  string `json:"hassh_known_bad,omitempty"`  // offensive library name if HASSH matches known-bad list
+	HasshHash     string `json:"hassh_hash,omitempty"`      // MD5 of SSH_MSG_KEXINIT algorithm lists
+	HasshKnownBad string `json:"hassh_known_bad,omitempty"` // offensive library name if HASSH matches known-bad list
 	// QUIC / transport enrichment
 	IsQUIC  bool `json:"is_quic,omitempty"`  // true when at least one QUIC Initial packet was observed
 	IsHTTP2 bool `json:"is_http2,omitempty"` // true when HTTP/2 client preface was observed
@@ -153,20 +158,21 @@ type FlowRecord struct {
 	IsIPv6RH0      bool `json:"is_ipv6_rh0,omitempty"`      // IPv6 Routing Header type 0 (deprecated, RFC 5095)
 	IsIPv6Fragment bool `json:"is_ipv6_fragment,omitempty"` // IPv6 Fragment Header present
 	// DNS response analysis
-	NXDomainCount int    `json:"nxdomain_count,omitempty"` // number of NXDOMAIN responses in this flow
-	MinDNSTTL     uint32 `json:"min_dns_ttl,omitempty"`    // minimum A/AAAA TTL observed (0 = no answers)
+	NXDomainCount  int    `json:"nxdomain_count,omitempty"`    // number of NXDOMAIN responses in this flow
+	MinDNSTTL      uint32 `json:"min_dns_ttl,omitempty"`       // minimum A/AAAA TTL observed
+	DNSRespTTLSeen bool   `json:"dns_resp_ttl_seen,omitempty"` // distinguishes a real TTL=0 from no A/AAAA answer
 	// HTTP/1.1 enrichment
 	HTTPMethod    string `json:"http_method,omitempty"`
 	HTTPHost      string `json:"http_host,omitempty"`
 	HTTPUserAgent string `json:"http_user_agent,omitempty"`
 	HTTPURI       string `json:"http_uri,omitempty"`
 	// TLS certificate anomalies (from ServerCertificate message)
-	TLSCertSelfSigned  bool   `json:"tls_cert_self_signed,omitempty"`
-	TLSCertExpired     bool   `json:"tls_cert_expired,omitempty"`
-	TLSCertValidDays   int    `json:"tls_cert_valid_days,omitempty"`
-	TLSCertSubjectCN   string `json:"tls_cert_cn,omitempty"`
-	TLSCertHasSAN      bool   `json:"tls_cert_has_san,omitempty"`
-	TLSCertIsIPCN      bool   `json:"tls_cert_ip_cn,omitempty"`
+	TLSCertSelfSigned bool   `json:"tls_cert_self_signed,omitempty"`
+	TLSCertExpired    bool   `json:"tls_cert_expired,omitempty"`
+	TLSCertValidDays  int    `json:"tls_cert_valid_days,omitempty"`
+	TLSCertSubjectCN  string `json:"tls_cert_cn,omitempty"`
+	TLSCertHasSAN     bool   `json:"tls_cert_has_san,omitempty"`
+	TLSCertIsIPCN     bool   `json:"tls_cert_ip_cn,omitempty"`
 	// IP reputation (blocklist match)
 	IPRepLabel string `json:"ip_rep_label,omitempty"` // non-empty when dst IP matches a threat-intel blocklist
 	// DomRepLabel is set when any DNS query or TLS SNI for this flow matches a
@@ -196,7 +202,6 @@ type RecurrenceResolver func(srcIP, dstIP string, dstPort uint16, proto string) 
 // flowState is the mutable, concurrent-safe per-flow accumulator.
 type flowState struct {
 	mu            sync.Mutex
-	srcPort       uint16
 	packetCount   int64
 	byteCount     int64
 	firstSeen     time.Time
@@ -209,12 +214,13 @@ type flowState struct {
 	hasshHash     string              // first HASSH fingerprint observed for this flow (SSH client)
 	isQUIC        bool                // any packet in this flow was a QUIC Initial
 	nxdomainCount int                 // number of NXDOMAIN responses in this flow
-	minDNSTTL     uint32              // minimum A/AAAA TTL from DNS responses; 0 = not seen
+	minDNSTTL     uint32              // minimum A/AAAA TTL from DNS responses
+	dnsTTLSeen    bool                // true even when the observed minimum TTL is zero
 	// HTTP/1.1 enrichment — first observed request wins.
-	httpMethod    string
-	httpHost      string
-	httpUserAgent string
-	httpURI       string
+	httpMethod     string
+	httpHost       string
+	httpUserAgent  string
+	httpURI        string
 	isHTTP2        bool
 	isGRPC         bool
 	isIPv6RH0      bool
@@ -232,26 +238,29 @@ type Aggregator struct {
 // PacketEvent mirrors capture.PacketEvent but uses net.IP to avoid an
 // import cycle between aggregate and capture.
 type PacketEvent struct {
-	SrcIP         net.IP
-	DstIP         net.IP
-	SrcPort       uint16
-	DstPort       uint16
-	Proto         string
-	PayloadLen    uint32
-	Timestamp     time.Time
-	DNSQuery      string // first question name from a DNS packet (optional)
-	TLSSNIName    string // server name from TLS ClientHello (optional)
-	JA3Hash       string // JA3 fingerprint of TLS ClientHello (optional)
-	JA3SHash      string // JA3S fingerprint of TLS ServerHello (optional)
-	HasshHash     string // HASSH fingerprint of SSH_MSG_KEXINIT (optional)
-	IsQUIC        bool   // true when UDP 443 payload is a QUIC Initial packet
-	DNSNXDomain   bool   // DNS response returned NXDOMAIN
-	DNSMinRespTTL uint32 // minimum A/AAAA TTL from DNS response (0 = no answers)
+	SrcIP          net.IP
+	DstIP          net.IP
+	SrcPort        uint16
+	DstPort        uint16
+	Proto          string
+	Interface      string
+	PayloadLen     uint32
+	Timestamp      time.Time
+	EnrichmentOnly bool   // synthetic metadata event; must not affect packet/timing counters
+	DNSQuery       string // first question name from a DNS packet (optional)
+	TLSSNIName     string // server name from TLS ClientHello (optional)
+	JA3Hash        string // JA3 fingerprint of TLS ClientHello (optional)
+	JA3SHash       string // JA3S fingerprint of TLS ServerHello (optional)
+	HasshHash      string // HASSH fingerprint of SSH_MSG_KEXINIT (optional)
+	IsQUIC         bool   // true when UDP 443 payload is a QUIC Initial packet
+	DNSNXDomain    bool   // DNS response returned NXDOMAIN
+	DNSMinRespTTL  uint32 // minimum A/AAAA TTL from DNS response
+	DNSRespTTLSeen bool   // true when an A/AAAA TTL was observed, including TTL=0
 	// HTTP/1.1 enrichment.
-	HTTPMethod    string // "GET", "POST", "CONNECT", …
-	HTTPHost      string
-	HTTPUserAgent string
-	HTTPURI       string
+	HTTPMethod     string // "GET", "POST", "CONNECT", …
+	HTTPHost       string
+	HTTPUserAgent  string
+	HTTPURI        string
 	IsHTTP2        bool
 	IsGRPC         bool
 	IsIPv6RH0      bool
@@ -260,29 +269,68 @@ type PacketEvent struct {
 	TLSCertInfo *capture.CertInfo
 }
 
+// FromCapturePacket converts the capture-layer event into the aggregation
+// event without dropping enrichment fields. Keeping this mapping in one place
+// prevents the MCP tools and daemon from silently enabling different detectors.
+func FromCapturePacket(pkt capture.PacketEvent, iface string) PacketEvent {
+	return PacketEvent{
+		SrcIP:          pkt.SrcIP,
+		DstIP:          pkt.DstIP,
+		SrcPort:        pkt.SrcPort,
+		DstPort:        pkt.DstPort,
+		Proto:          pkt.Proto,
+		Interface:      iface,
+		PayloadLen:     pkt.PayloadLen,
+		Timestamp:      pkt.Timestamp,
+		EnrichmentOnly: pkt.EnrichmentOnly,
+		DNSQuery:       pkt.DNSQuery,
+		TLSSNIName:     pkt.TLSSNIName,
+		JA3Hash:        pkt.JA3Hash,
+		JA3SHash:       pkt.JA3SHash,
+		HasshHash:      pkt.HasshHash,
+		IsQUIC:         pkt.IsQUIC,
+		DNSNXDomain:    pkt.DNSNXDomain,
+		DNSMinRespTTL:  pkt.DNSMinRespTTL,
+		DNSRespTTLSeen: pkt.DNSRespTTLSeen,
+		HTTPMethod:     pkt.HTTPMethod,
+		HTTPHost:       pkt.HTTPHost,
+		HTTPUserAgent:  pkt.HTTPUserAgent,
+		HTTPURI:        pkt.HTTPURI,
+		IsHTTP2:        pkt.IsHTTP2,
+		IsGRPC:         pkt.IsGRPC,
+		IsIPv6RH0:      pkt.IsIPv6RH0,
+		IsIPv6Fragment: pkt.IsIPv6Fragment,
+		TLSCertInfo:    pkt.TLSCertInfo,
+	}
+}
+
 // Add processes a single packet event.
 func (a *Aggregator) Add(pkt PacketEvent) {
 	key := FlowKey{
-		SrcIP:   pkt.SrcIP.String(),
-		DstIP:   pkt.DstIP.String(),
-		DstPort: pkt.DstPort,
-		Proto:   pkt.Proto,
+		SrcIP:     pkt.SrcIP.String(),
+		DstIP:     pkt.DstIP.String(),
+		SrcPort:   pkt.SrcPort,
+		DstPort:   pkt.DstPort,
+		Proto:     pkt.Proto,
+		Interface: pkt.Interface,
 	}
 
-	v, _ := a.flows.LoadOrStore(key, &flowState{
-		firstSeen: pkt.Timestamp,
-		srcPort:   pkt.SrcPort,
-	})
+	v, _ := a.flows.LoadOrStore(key, &flowState{})
 	fs := v.(*flowState)
 
 	fs.mu.Lock()
-	fs.packetCount++
-	fs.byteCount += int64(pkt.PayloadLen)
-	if pkt.Timestamp.After(fs.lastSeen) {
-		fs.lastSeen = pkt.Timestamp
-	}
-	if len(fs.timestamps) < 1024 { // cap to avoid unbounded memory
-		fs.timestamps = append(fs.timestamps, pkt.Timestamp)
+	if !pkt.EnrichmentOnly {
+		fs.packetCount++
+		fs.byteCount += int64(pkt.PayloadLen)
+		if fs.firstSeen.IsZero() || pkt.Timestamp.Before(fs.firstSeen) {
+			fs.firstSeen = pkt.Timestamp
+		}
+		if pkt.Timestamp.After(fs.lastSeen) {
+			fs.lastSeen = pkt.Timestamp
+		}
+		if len(fs.timestamps) < 1024 { // cap to avoid unbounded memory
+			fs.timestamps = append(fs.timestamps, pkt.Timestamp)
+		}
 	}
 	if pkt.DNSQuery != "" {
 		if fs.dnsQueries == nil {
@@ -323,10 +371,11 @@ func (a *Aggregator) Add(pkt PacketEvent) {
 	if pkt.DNSNXDomain {
 		fs.nxdomainCount++
 	}
-	if pkt.DNSMinRespTTL > 0 {
-		if fs.minDNSTTL == 0 || pkt.DNSMinRespTTL < fs.minDNSTTL {
+	if pkt.DNSRespTTLSeen {
+		if !fs.dnsTTLSeen || pkt.DNSMinRespTTL < fs.minDNSTTL {
 			fs.minDNSTTL = pkt.DNSMinRespTTL
 		}
+		fs.dnsTTLSeen = true
 	}
 	// HTTP/1.1 — keep first observed request per flow.
 	if pkt.HTTPMethod != "" && fs.httpMethod == "" {
@@ -389,37 +438,40 @@ func (a *Aggregator) Finalize(resolver ProcessResolver, recRes RecurrenceResolve
 		isIPv6Fragment := fs.isIPv6Fragment
 		nxdomainCount := fs.nxdomainCount
 		minDNSTTL := fs.minDNSTTL
+		dnsTTLSeen := fs.dnsTTLSeen
 		httpMethod := fs.httpMethod
 		httpHost := fs.httpHost
 		httpUA := fs.httpUserAgent
 		httpURI := fs.httpURI
 		certInfo := fs.tlsCertInfo
 		rec := FlowRecord{
-			SrcIP:         key.SrcIP,
-			DstIP:         key.DstIP,
-			SrcPort:       fs.srcPort,
-			DstPort:       key.DstPort,
-			Protocol:      key.Proto,
-			PacketCount:   fs.packetCount,
-			ByteCount:     fs.byteCount,
-			FirstSeen:     fs.firstSeen,
-			LastSeen:      fs.lastSeen,
-			DNSQueries:    dnsSlice,
-			TLSSNIName:    sniName,
-			JA3Hash:       ja3h,
-			JA3SHash:      ja3sh,
-			HasshHash:     hasshH,
+			SrcIP:          key.SrcIP,
+			DstIP:          key.DstIP,
+			SrcPort:        key.SrcPort,
+			DstPort:        key.DstPort,
+			Protocol:       key.Proto,
+			PacketCount:    fs.packetCount,
+			ByteCount:      fs.byteCount,
+			FirstSeen:      fs.firstSeen,
+			LastSeen:       fs.lastSeen,
+			DNSQueries:     dnsSlice,
+			TLSSNIName:     sniName,
+			JA3Hash:        ja3h,
+			JA3SHash:       ja3sh,
+			HasshHash:      hasshH,
 			IsQUIC:         isQUIC,
 			IsHTTP2:        isHTTP2,
 			IsGRPC:         isGRPC,
 			IsIPv6RH0:      isIPv6RH0,
 			IsIPv6Fragment: isIPv6Fragment,
-			NXDomainCount: nxdomainCount,
-			MinDNSTTL:     minDNSTTL,
-			HTTPMethod:    httpMethod,
-			HTTPHost:      httpHost,
-			HTTPUserAgent: httpUA,
-			HTTPURI:       httpURI,
+			NXDomainCount:  nxdomainCount,
+			MinDNSTTL:      minDNSTTL,
+			DNSRespTTLSeen: dnsTTLSeen,
+			HTTPMethod:     httpMethod,
+			HTTPHost:       httpHost,
+			HTTPUserAgent:  httpUA,
+			HTTPURI:        httpURI,
+			Interface:      key.Interface,
 		}
 		// Flatten TLS cert fields into the record (avoids pointer in JSON output).
 		if certInfo != nil {
@@ -554,12 +606,20 @@ func (a *Aggregator) Finalize(resolver ProcessResolver, recRes RecurrenceResolve
 	if !config.Get().Scoring.DisableAsymmetricScoring {
 		byKey := make(map[FlowKey]int, len(records))
 		for i, r := range records {
-			byKey[FlowKey{SrcIP: r.SrcIP, DstIP: r.DstIP, DstPort: r.DstPort, Proto: r.Protocol}] = i
+			byKey[FlowKey{
+				SrcIP: r.SrcIP, DstIP: r.DstIP,
+				SrcPort: r.SrcPort, DstPort: r.DstPort,
+				Proto: r.Protocol, Interface: r.Interface,
+			}] = i
 		}
 		asymRatio := config.Get().Scoring.AsymmetricUploadRatio
 		for i, r := range records {
 			// The reverse flow key: server IP → client IP, DstPort = client's ephemeral SrcPort.
-			revKey := FlowKey{SrcIP: r.DstIP, DstIP: r.SrcIP, DstPort: r.SrcPort, Proto: r.Protocol}
+			revKey := FlowKey{
+				SrcIP: r.DstIP, DstIP: r.SrcIP,
+				SrcPort: r.DstPort, DstPort: r.SrcPort,
+				Proto: r.Protocol, Interface: r.Interface,
+			}
 			j, ok := byKey[revKey]
 			if !ok {
 				continue
@@ -840,8 +900,9 @@ func score(key FlowKey, rec FlowRecord, ts []time.Time, recurrence int) (float64
 				effectiveBadPorts[k] = v
 			}
 			for _, p := range cfg.ExtraBadPorts {
-				if effectiveBadPorts[uint16(p)] == "" {
-					effectiveBadPorts[uint16(p)] = "user-defined bad port"
+				port := uint16(p) // #nosec G115 -- config validation restricts ports to [1, 65535].
+				if effectiveBadPorts[port] == "" {
+					effectiveBadPorts[port] = "user-defined bad port"
 				}
 			}
 		}
@@ -852,7 +913,7 @@ func score(key FlowKey, rec FlowRecord, ts []time.Time, recurrence int) (float64
 				effectiveStdPorts[k] = v
 			}
 			for _, p := range cfg.ExtraStandardPorts {
-				effectiveStdPorts[uint16(p)] = true
+				effectiveStdPorts[uint16(p)] = true // #nosec G115 -- config validation restricts ports to [1, 65535].
 			}
 		}
 		if why, bad := effectiveBadPorts[key.DstPort]; bad {
@@ -1056,7 +1117,7 @@ func score(key FlowKey, rec FlowRecord, ts []time.Time, recurrence int) (float64
 			addTo(&sm.dns, 2.0, fmt.Sprintf("dns nxdomain storm: %d NXDOMAIN responses — potential DGA activity",
 				rec.NXDomainCount))
 		}
-		if rec.MinDNSTTL > 0 && rec.MinDNSTTL < uint32(cfg.FastFluxTTLThreshold) {
+		if rec.DNSRespTTLSeen && rec.MinDNSTTL < uint32(cfg.FastFluxTTLThreshold) { // #nosec G115 -- config validation restricts the threshold to [1, 86400].
 			addTo(&sm.dns, 1.5, fmt.Sprintf("low dns ttl=%d seconds — potential fast-flux or DGA domain",
 				rec.MinDNSTTL))
 		}

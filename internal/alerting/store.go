@@ -14,10 +14,10 @@ import (
 
 // AlertRecord is one fired alert, persisted in the alert log.
 type AlertRecord struct {
-	Timestamp time.Time              `json:"timestamp"`
-	Severity  string                 `json:"severity"`   // CRITICAL, HIGH, etc.
-	DedupeKey string                 `json:"dedupe_key"` // flow identifier
-	Flow      aggregate.FlowRecord   `json:"flow"`
+	Timestamp time.Time            `json:"timestamp"`
+	Severity  string               `json:"severity"`   // CRITICAL, HIGH, etc.
+	DedupeKey string               `json:"dedupe_key"` // flow identifier
+	Flow      aggregate.FlowRecord `json:"flow"`
 }
 
 // AlertQueryOpts filters alert log reads.

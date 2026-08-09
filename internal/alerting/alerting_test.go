@@ -6,12 +6,18 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"testing"
 	"time"
 
 	"github.com/ClementG91/MCP-FlowSentinel/internal/aggregate"
 	"github.com/ClementG91/MCP-FlowSentinel/internal/config"
 )
+
+func TestMain(m *testing.M) {
+	retryBaseWait = time.Millisecond
+	os.Exit(m.Run())
+}
 
 func highFlow(score float64) aggregate.FlowRecord {
 	return aggregate.FlowRecord{
@@ -25,6 +31,7 @@ func highFlow(score float64) aggregate.FlowRecord {
 }
 
 func TestFire_Disabled_NoRequest(t *testing.T) {
+	ResetDedupForTesting()
 	var called bool
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		called = true
@@ -50,6 +57,7 @@ func TestFire_Disabled_NoRequest(t *testing.T) {
 }
 
 func TestFire_NoWebhookURL_NoRequest(t *testing.T) {
+	ResetDedupForTesting()
 	var called bool
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		called = true
@@ -74,6 +82,7 @@ func TestFire_NoWebhookURL_NoRequest(t *testing.T) {
 }
 
 func TestFire_ScoreBelowThreshold_NoRequest(t *testing.T) {
+	ResetDedupForTesting()
 	var called bool
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		called = true
@@ -99,6 +108,7 @@ func TestFire_ScoreBelowThreshold_NoRequest(t *testing.T) {
 }
 
 func TestFire_AboveThreshold_PostsJSON(t *testing.T) {
+	ResetDedupForTesting()
 	received := make(chan []byte, 1)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
@@ -130,12 +140,16 @@ func TestFire_AboveThreshold_PostsJSON(t *testing.T) {
 		if a.Flow.SuspicionScore != 8.5 {
 			t.Errorf("SuspicionScore = %v, want 8.5", a.Flow.SuspicionScore)
 		}
+		if a.Text == "" || a.Content == "" {
+			t.Errorf("expected Slack and Discord message fields, got text=%q content=%q", a.Text, a.Content)
+		}
 	case <-time.After(3 * time.Second):
 		t.Fatal("webhook not called within 3s")
 	}
 }
 
 func TestFire_WebhookError_NosPanic(t *testing.T) {
+	ResetDedupForTesting()
 	original := config.Get()
 	defer config.Set(original)
 
@@ -151,6 +165,7 @@ func TestFire_WebhookError_NosPanic(t *testing.T) {
 }
 
 func TestFire_BadHTTPStatus_LogsNotPanics(t *testing.T) {
+	ResetDedupForTesting()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(500)
 	}))
@@ -604,6 +619,7 @@ func TestFire_EnvVarWebhook_Overrides(t *testing.T) {
 
 	original := config.Get()
 	defer config.Set(original)
+	ResetDedupForTesting()
 
 	// Config has alerting enabled but no URL.
 	cfg := config.Default()

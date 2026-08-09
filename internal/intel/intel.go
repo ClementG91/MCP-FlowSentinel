@@ -75,15 +75,15 @@ func Enabled() bool { return cityDB != nil || asnDB != nil }
 // hosters are included, not general-purpose cloud providers.
 // Sources: abuse.ch, Spamhaus ASN-DROP, public security research reports.
 var highRiskASNPatterns = []string{
-	"frantech",    // Frantech Solutions / BuyVM — bulletproof hosting
-	"serverius",   // Serverius BV — known bulletproof hoster
-	"hostsailor",  // HostSailor — abuse-tolerant hoster
-	"quadranet",   // QuadraNet Enterprises — frequently hosts C2
-	"shinjiru",    // Shinjiru Technology — bulletproof hoster
-	"combahton",   // Combahton GmbH — bulletproof hosting
-	"route48",     // Route48 — abuse-tolerant
+	"frantech",     // Frantech Solutions / BuyVM — bulletproof hosting
+	"serverius",    // Serverius BV — known bulletproof hoster
+	"hostsailor",   // HostSailor — abuse-tolerant hoster
+	"quadranet",    // QuadraNet Enterprises — frequently hosts C2
+	"shinjiru",     // Shinjiru Technology — bulletproof hoster
+	"combahton",    // Combahton GmbH — bulletproof hosting
+	"route48",      // Route48 — abuse-tolerant
 	"privatelayer", // PrivateLayer Inc — bulletproof
-	"psychz",      // Psychz Networks — frequently abused
+	"psychz",       // Psychz Networks — frequently abused
 }
 
 // Lookup returns threat-intelligence for the given IP string, or nil if no

@@ -1,5 +1,5 @@
 # =============================================================================
-#  MCP-FlowSentinel — Build from source (Windows)
+#  MCP-FlowSentinel - Build from source (Windows)
 #  For most users, use the one-liner installer instead:
 #    irm https://raw.githubusercontent.com/ClementG91/MCP-FlowSentinel/main/install.ps1 | iex
 #
@@ -13,7 +13,7 @@ $ProjectDir = $PSScriptRoot
 $BinaryName = "mcp-flowsentinel.exe"
 $BinaryPath = Join-Path $ProjectDir $BinaryName
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
+# -- Helpers ------------------------------------------------------------------
 function Write-Step { param($m) Write-Host "`n==> $m" -ForegroundColor Cyan }
 function Write-Ok   { param($m) Write-Host "  [OK]   $m" -ForegroundColor Green }
 function Write-Warn { param($m) Write-Host "  [WARN] $m" -ForegroundColor Yellow }
@@ -22,11 +22,11 @@ function Write-Info { param($m) Write-Host "         $m" -ForegroundColor Gray }
 function Abort      { param($m) Write-Fail $m; Read-Host "`nPress Enter to exit"; exit 1 }
 
 Write-Host ""
-Write-Host "  MCP-FlowSentinel — Build from source" -ForegroundColor Cyan
+Write-Host "  MCP-FlowSentinel - Build from source" -ForegroundColor Cyan
 Write-Host "  https://github.com/ClementG91/MCP-FlowSentinel" -ForegroundColor DarkGray
 Write-Host ""
 
-# ── Step 0: Admin check ───────────────────────────────────────────────────────
+# -- Step 0: Admin check -------------------------------------------------------
 Write-Step "Checking administrator rights..."
 $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
     [Security.Principal.WindowsBuiltInRole]::Administrator)
@@ -40,29 +40,31 @@ if (-not $isAdmin) {
     Write-Ok "Running as Administrator."
 }
 
-# ── Step 1: Check / install Go ────────────────────────────────────────────────
-Write-Step "Checking Go (>= 1.22)..."
+# -- Step 1: Check / install Go -----------------------------------------------
+Write-Step "Checking Go (>= 1.25.12)..."
 $goOk = $false
 try {
     $goRaw = & go version 2>&1
-    if ($LASTEXITCODE -eq 0 -and $goRaw -match "go(\d+)\.(\d+)") {
-        $maj = [int]$Matches[1]; $min = [int]$Matches[2]
-        if ($maj -gt 1 -or ($maj -eq 1 -and $min -ge 22)) {
+    if ($LASTEXITCODE -eq 0 -and $goRaw -match "go(\d+)\.(\d+)(?:\.(\d+))?") {
+        $maj = [int]$Matches[1]; $min = [int]$Matches[2]; $patch = 0
+        if ($Matches.Count -gt 3 -and $Matches[3]) { $patch = [int]$Matches[3] }
+        if ($maj -gt 1 -or ($maj -eq 1 -and ($min -gt 25 -or ($min -eq 25 -and $patch -ge 12)))) {
             $goOk = $true
             Write-Ok "$goRaw"
         } else {
-            Write-Warn "Go $maj.$min found, but 1.22+ required."
+            Write-Warn "Go $maj.$min.$patch found, but 1.25.12+ required."
         }
     }
 } catch {}
 
 if (-not $goOk) {
-    Write-Warn "Go not found or too old — installing via winget..."
+    Write-Warn "Go not found or too old - installing via winget..."
     try {
         winget install GoLang.Go --accept-package-agreements --accept-source-agreements --silent
         # Refresh PATH in current session
-        $env:PATH = [System.Environment]::GetEnvironmentVariable("PATH", "Machine") + ";" +
-                    [System.Environment]::GetEnvironmentVariable("PATH", "User")
+        $machinePath = [System.Environment]::GetEnvironmentVariable("PATH", "Machine")
+        $userPath = [System.Environment]::GetEnvironmentVariable("PATH", "User")
+        $env:PATH = '{0};{1}' -f $machinePath, $userPath
         $goRaw = & go version 2>&1
         Write-Ok "Go installed: $goRaw"
     } catch {
@@ -70,9 +72,10 @@ if (-not $goOk) {
     }
 }
 
-# ── Step 2: Check / install GCC (MinGW) via winget ───────────────────────────
+# -- Step 2: Check / install GCC (MinGW) via winget ---------------------------
 Write-Step "Checking GCC (required for CGO)..."
-$gccPath = (Get-Command gcc -ErrorAction SilentlyContinue)?.Source
+$gccCommand = Get-Command gcc -ErrorAction SilentlyContinue
+$gccPath = if ($gccCommand) { $gccCommand.Source } else { $null }
 if (-not $gccPath) {
     # Search winget-installed WinLibs
     $candidate = Get-ChildItem "$env:LOCALAPPDATA\Microsoft\WinGet\Packages\BrechtSanders.WinLibs*" `
@@ -84,9 +87,9 @@ if ($gccPath) {
     $gccVer = & $gccPath --version 2>&1 | Select-Object -First 1
     Write-Ok "GCC found: $gccVer"
     $gccDir = Split-Path $gccPath
-    if ($env:PATH -notlike "*$gccDir*") { $env:PATH = "$gccDir;$env:PATH" }
+    if ($env:PATH -notlike "*$gccDir*") { $env:PATH = '{0};{1}' -f $gccDir, $env:PATH }
 } else {
-    Write-Warn "GCC not found — installing WinLibs (MinGW-w64) via winget..."
+    Write-Warn "GCC not found - installing WinLibs (MinGW-w64) via winget..."
     try {
         winget install BrechtSanders.WinLibs.POSIX.UCRT --accept-package-agreements --accept-source-agreements --silent
         # Locate freshly installed gcc.exe
@@ -95,7 +98,7 @@ if ($gccPath) {
             -Recurse -Filter "gcc.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
         if ($candidate) {
             $gccDir = Split-Path $candidate.FullName
-            $env:PATH = "$gccDir;$env:PATH"
+            $env:PATH = '{0};{1}' -f $gccDir, $env:PATH
             Write-Ok "GCC installed: $gccDir"
         } else {
             Abort "GCC installed but not found. Restart PowerShell and re-run."
@@ -105,10 +108,12 @@ if ($gccPath) {
     }
 }
 
-# ── Step 3: Check Npcap runtime ───────────────────────────────────────────────
+# -- Step 3: Check Npcap runtime ----------------------------------------------
 Write-Step "Checking Npcap runtime..."
-$npcapOk = (Get-Service -Name "npcap" -ErrorAction SilentlyContinue) -or
-           (Test-Path "$env:SystemRoot\System32\Npcap\wpcap.dll")
+$npcapOk = (
+    (Get-Service -Name "npcap" -ErrorAction SilentlyContinue) -or
+    (Test-Path "$env:SystemRoot\System32\Npcap\wpcap.dll")
+)
 if ($npcapOk) {
     Write-Ok "Npcap detected."
 } else {
@@ -122,7 +127,7 @@ if ($npcapOk) {
     if ($ans -notmatch "^[yY]") { exit 0 }
 }
 
-# ── Step 4: Locate / download Npcap SDK (headers for CGO) ────────────────────
+# -- Step 4: Locate / download Npcap SDK (headers for CGO) --------------------
 Write-Step "Locating Npcap SDK (compile-time headers)..."
 
 $sdkCandidates = @(
@@ -145,7 +150,7 @@ foreach ($p in $sdkCandidates) {
 if ($NpcapSDK) {
     Write-Ok "Npcap SDK found: $NpcapSDK"
 } else {
-    Write-Warn "Npcap SDK not found — downloading automatically..."
+    Write-Warn "Npcap SDK not found - downloading automatically..."
     $sdkDest = "$env:USERPROFILE\npcap-sdk"
     $sdkZip  = "$env:TEMP\npcap-sdk.zip"
     try {
@@ -155,11 +160,11 @@ if ($NpcapSDK) {
         $NpcapSDK = $sdkDest
         Write-Ok "Npcap SDK downloaded and extracted to: $NpcapSDK"
     } catch {
-        Abort "Failed to download Npcap SDK: $_`nDownload manually from https://npcap.com/#download (SDK section) and extract to C:\npcap-sdk\"
+        Abort "Failed to download Npcap SDK: $_`nDownload manually from https://npcap.com/#download (SDK section) and extract to C:\npcap-sdk"
     }
 }
 
-# ── Step 5: Build ─────────────────────────────────────────────────────────────
+# -- Step 5: Build -------------------------------------------------------------
 Write-Step "Building $BinaryName..."
 Set-Location $ProjectDir
 
@@ -181,7 +186,7 @@ try {
 }
 Write-Ok "Binary built: $BinaryPath"
 
-# ── Step 6: Sanity check ──────────────────────────────────────────────────────
+# -- Step 6: Sanity check ------------------------------------------------------
 Write-Step "Running $BinaryName --check..."
 Write-Host ""
 & $BinaryPath --check
@@ -193,7 +198,7 @@ if ($checkCode -eq 0) {
     Write-Warn "Some checks failed (see above). Capture requires Administrator at runtime."
 }
 
-# ── Step 7: Configure Claude Desktop ─────────────────────────────────────────
+# -- Step 7: Configure Claude Desktop -----------------------------------------
 Write-Step "Configuring Claude Desktop..."
 $claudeDir  = Join-Path $env:APPDATA "Claude"
 $claudeConf = Join-Path $claudeDir "claude_desktop_config.json"
@@ -211,7 +216,7 @@ $config.mcpServers | Add-Member -MemberType NoteProperty -Name "flowsentinel" `
 $config | ConvertTo-Json -Depth 10 | Set-Content $claudeConf -Encoding UTF8
 Write-Ok "Claude Desktop configured: $claudeConf"
 
-# ── Done ──────────────────────────────────────────────────────────────────────
+# -- Done ---------------------------------------------------------------------
 Write-Host ""
 Write-Host "  ============================================" -ForegroundColor Green
 Write-Host "   Build complete! ($version)" -ForegroundColor Green

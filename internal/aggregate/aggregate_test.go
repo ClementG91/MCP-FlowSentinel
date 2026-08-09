@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ClementG91/MCP-FlowSentinel/internal/capture"
 	"github.com/ClementG91/MCP-FlowSentinel/internal/config"
 )
 
@@ -77,9 +78,9 @@ func makeRec(opts ...func(*FlowRecord)) FlowRecord {
 }
 
 func withBinaryPath(p string) func(*FlowRecord) { return func(r *FlowRecord) { r.BinaryPath = p } }
-func withCmdline(c string) func(*FlowRecord)     { return func(r *FlowRecord) { r.Cmdline = c } }
-func withPID(pid int32) func(*FlowRecord)         { return func(r *FlowRecord) { r.PID = pid } }
-func withRDNS(h string) func(*FlowRecord)         { return func(r *FlowRecord) { r.ReverseDNS = h } }
+func withCmdline(c string) func(*FlowRecord)    { return func(r *FlowRecord) { r.Cmdline = c } }
+func withPID(pid int32) func(*FlowRecord)       { return func(r *FlowRecord) { r.PID = pid } }
+func withRDNS(h string) func(*FlowRecord)       { return func(r *FlowRecord) { r.ReverseDNS = h } }
 
 func TestScore_KnownBadPort(t *testing.T) {
 	key := FlowKey{SrcIP: "10.0.0.1", DstIP: "8.8.8.8", DstPort: 4444, Proto: "TCP"}
@@ -209,7 +210,10 @@ func TestScore_PublicIPGetsDNSPenalty(t *testing.T) {
 // ─── riskLabel ─────────────────────────────────────────────────────────────────
 
 func TestRiskLabel(t *testing.T) {
-	tests := []struct{ score float64; want string }{
+	tests := []struct {
+		score float64
+		want  string
+	}{
 		{10.0, "CRITICAL"},
 		{7.0, "CRITICAL"},
 		{6.9, "HIGH"},
@@ -234,10 +238,10 @@ func TestShannonEntropy(t *testing.T) {
 		want float64 // approximate lower bound to assert non-trivially
 	}{
 		{"", 0},
-		{"aaaa", 0},           // uniform → entropy = 0
-		{"ab", 1.0},           // 2 equiprobable chars → 1 bit
-		{"abcd", 2.0},         // 4 equiprobable chars → 2 bits
-		{"aHk3mXpQ2", 3.0},   // high entropy, > 3 bits
+		{"aaaa", 0},        // uniform → entropy = 0
+		{"ab", 1.0},        // 2 equiprobable chars → 1 bit
+		{"abcd", 2.0},      // 4 equiprobable chars → 2 bits
+		{"aHk3mXpQ2", 3.0}, // high entropy, > 3 bits
 	}
 	for _, tc := range tests {
 		got := shannonEntropy(tc.s)
@@ -888,8 +892,8 @@ func TestLateralMovementSignal(t *testing.T) {
 		{389, 1.5, "LDAP"},
 		{636, 1.5, "LDAPS"},
 		{22, 1.0, "SSH"},
-		{80, 0, ""},   // normal port — no signal
-		{443, 0, ""},  // normal port — no signal
+		{80, 0, ""},  // normal port — no signal
+		{443, 0, ""}, // normal port — no signal
 	}
 	for _, tc := range cases {
 		pts, reason := lateralMovementSignal(tc.port)
@@ -1087,6 +1091,7 @@ func TestScore_FastFluxTTL_AddsReason(t *testing.T) {
 	key := FlowKey{SrcIP: "10.0.0.1", DstIP: "8.8.8.8", DstPort: 53, Proto: "UDP"}
 	rec := makeRec(withRDNS("dns.google"), func(r *FlowRecord) {
 		r.MinDNSTTL = 10 // < 30s threshold
+		r.DNSRespTTLSeen = true
 		r.DstIP = "8.8.8.8"
 	})
 	_, reasons := score(key, rec, nil, 0)
@@ -1105,6 +1110,7 @@ func TestScore_NormalTTL_NoFastFluxReason(t *testing.T) {
 	key := FlowKey{SrcIP: "10.0.0.1", DstIP: "8.8.8.8", DstPort: 53, Proto: "UDP"}
 	rec := makeRec(withRDNS("dns.google"), func(r *FlowRecord) {
 		r.MinDNSTTL = 300 // normal 5-minute TTL
+		r.DNSRespTTLSeen = true
 		r.DstIP = "8.8.8.8"
 	})
 	_, reasons := score(key, rec, nil, 0)
@@ -1148,13 +1154,14 @@ func TestAggregatorAdd_MinDNSTTL_TracksMinimum(t *testing.T) {
 
 	for _, ttl := range []uint32{300, 60, 10, 120} {
 		agg.Add(PacketEvent{
-			SrcIP:         net.ParseIP("10.0.0.1"),
-			DstIP:         net.ParseIP("8.8.8.8"),
-			SrcPort:       12345,
-			DstPort:       53,
-			Proto:         "UDP",
-			Timestamp:     now,
-			DNSMinRespTTL: ttl,
+			SrcIP:          net.ParseIP("10.0.0.1"),
+			DstIP:          net.ParseIP("8.8.8.8"),
+			SrcPort:        12345,
+			DstPort:        53,
+			Proto:          "UDP",
+			Timestamp:      now,
+			DNSMinRespTTL:  ttl,
+			DNSRespTTLSeen: true,
 		})
 	}
 
@@ -1164,6 +1171,99 @@ func TestAggregatorAdd_MinDNSTTL_TracksMinimum(t *testing.T) {
 	}
 	if records[0].MinDNSTTL != 10 {
 		t.Errorf("MinDNSTTL = %d, want 10 (minimum of 300/60/10/120)", records[0].MinDNSTTL)
+	}
+}
+
+func TestAggregatorAdd_DNSTTLZeroIsObservedAndScored(t *testing.T) {
+	agg := &Aggregator{}
+	agg.Add(PacketEvent{
+		SrcIP: net.ParseIP("10.0.0.1"), DstIP: net.ParseIP("8.8.8.8"),
+		SrcPort: 12345, DstPort: 53, Proto: "UDP", Timestamp: time.Now(),
+		DNSMinRespTTL: 0, DNSRespTTLSeen: true,
+	})
+	records := agg.Finalize(nil, nil)
+	if len(records) != 1 {
+		t.Fatalf("expected 1 flow, got %d", len(records))
+	}
+	if !records[0].DNSRespTTLSeen || records[0].MinDNSTTL != 0 {
+		t.Fatalf("TTL=0 observation lost: %+v", records[0])
+	}
+	found := false
+	for _, reason := range records[0].SuspicionReasons {
+		if strings.Contains(reason, "low dns ttl") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("TTL=0 should trigger low-TTL scoring, got %v", records[0].SuspicionReasons)
+	}
+}
+
+func TestAggregatorAdd_SeparatesSourcePortsAndInterfaces(t *testing.T) {
+	agg := &Aggregator{}
+	base := PacketEvent{
+		SrcIP: net.ParseIP("10.0.0.1"), DstIP: net.ParseIP("1.1.1.1"),
+		DstPort: 443, Proto: "TCP", Timestamp: time.Now(), PayloadLen: 10,
+	}
+	for _, variant := range []struct {
+		port  uint16
+		iface string
+	}{{10001, "eth0"}, {10002, "eth0"}, {10001, "eth1"}} {
+		event := base
+		event.SrcPort = variant.port
+		event.Interface = variant.iface
+		agg.Add(event)
+	}
+	records := agg.Finalize(nil, nil)
+	if len(records) != 3 {
+		t.Fatalf("distinct connections/interfaces merged: got %d records, want 3", len(records))
+	}
+}
+
+func TestAggregatorAdd_EnrichmentOnlyDoesNotDoubleCount(t *testing.T) {
+	agg := &Aggregator{}
+	now := time.Now()
+	base := PacketEvent{
+		SrcIP: net.ParseIP("10.0.0.1"), DstIP: net.ParseIP("1.1.1.1"),
+		SrcPort: 12345, DstPort: 443, Proto: "TCP", Timestamp: now, PayloadLen: 120,
+	}
+	agg.Add(base)
+	enrichment := base
+	enrichment.EnrichmentOnly = true
+	enrichment.PayloadLen = 999
+	enrichment.Timestamp = now.Add(time.Hour)
+	enrichment.TLSSNIName = "example.com"
+	agg.Add(enrichment)
+	records := agg.Finalize(nil, nil)
+	if len(records) != 1 {
+		t.Fatalf("expected 1 flow, got %d", len(records))
+	}
+	got := records[0]
+	if got.PacketCount != 1 || got.ByteCount != 120 || !got.LastSeen.Equal(now) {
+		t.Fatalf("enrichment changed traffic counters/timing: %+v", got)
+	}
+	if got.TLSSNIName != "example.com" {
+		t.Fatalf("enrichment metadata was lost: %+v", got)
+	}
+}
+
+func TestFromCapturePacket_MapsAdvancedSignals(t *testing.T) {
+	cert := &capture.CertInfo{IsSelfSigned: true, SubjectCN: "c2.example"}
+	input := capture.PacketEvent{
+		SrcIP: net.ParseIP("2001:db8::1"), DstIP: net.ParseIP("2001:db8::2"),
+		SrcPort: 44444, DstPort: 443, Proto: "TCP", PayloadLen: 42, Timestamp: time.Now(),
+		EnrichmentOnly: true, DNSQuery: "x.example", TLSSNIName: "example.com",
+		JA3Hash: "ja3", JA3SHash: "ja3s", HasshHash: "hassh", IsQUIC: true,
+		DNSNXDomain: true, DNSMinRespTTL: 0, DNSRespTTLSeen: true,
+		HTTPMethod: "POST", HTTPHost: "example.com", HTTPUserAgent: "agent", HTTPURI: "/rpc",
+		IsHTTP2: true, IsGRPC: true, IsIPv6RH0: true, IsIPv6Fragment: true, TLSCertInfo: cert,
+	}
+	got := FromCapturePacket(input, "eth9")
+	if got.Interface != "eth9" || got.JA3SHash != "ja3s" || got.HasshHash != "hassh" ||
+		!got.IsHTTP2 || !got.IsGRPC || !got.IsIPv6RH0 || !got.IsIPv6Fragment ||
+		got.TLSCertInfo != cert || !got.DNSRespTTLSeen || !got.EnrichmentOnly {
+		t.Fatalf("advanced capture signals were not mapped: %+v", got)
 	}
 }
 
@@ -1240,13 +1340,13 @@ func TestFinalize_AsymmetricUpload_AddsReason(t *testing.T) {
 
 func baseIPv6Flow() PacketEvent {
 	return PacketEvent{
-		SrcIP:     net.ParseIP("2001:db8::1"),
-		DstIP:     net.ParseIP("2001:db8::2"),
-		SrcPort:   50000,
-		DstPort:   443,
-		Proto:     "TCP",
+		SrcIP:      net.ParseIP("2001:db8::1"),
+		DstIP:      net.ParseIP("2001:db8::2"),
+		SrcPort:    50000,
+		DstPort:    443,
+		Proto:      "TCP",
 		PayloadLen: 100,
-		Timestamp: time.Now(),
+		Timestamp:  time.Now(),
 	}
 }
 

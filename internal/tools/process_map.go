@@ -39,9 +39,9 @@ func getProcessMapHandler(_ context.Context, _ mcp.CallToolRequest) (*mcp.CallTo
 	})
 
 	type response struct {
-		Timestamp                  time.Time                    `json:"timestamp"`
-		ProcessesWithConnectionsN  int                          `json:"processes_with_connections"`
-		Processes                  []*correlate.ProcessWithConns `json:"processes"`
+		Timestamp                 time.Time                     `json:"timestamp"`
+		ProcessesWithConnectionsN int                           `json:"processes_with_connections"`
+		Processes                 []*correlate.ProcessWithConns `json:"processes"`
 	}
 	out, err := json.Marshal(response{
 		Timestamp:                 time.Now().UTC(),

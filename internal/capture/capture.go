@@ -33,14 +33,18 @@ type PacketEvent struct {
 	Proto      string // "TCP" | "UDP"
 	PayloadLen uint32
 	Timestamp  time.Time
+	// EnrichmentOnly marks synthetic reassembly output. It carries metadata but
+	// must not increment packet, byte, duration, or beaconing counters.
+	EnrichmentOnly bool
 	// Optional enrichment — empty string means not present.
-	DNSQuery      string // first question name from a DNS/UDP-53 packet
-	TLSSNIName    string // server name from TLS ClientHello
-	JA3Hash       string // JA3 fingerprint of TLS ClientHello, "" if not TLS
-	IsQUIC        bool   // true when UDP 443 payload looks like a QUIC Initial packet
+	DNSQuery   string // first question name from a DNS/UDP-53 packet
+	TLSSNIName string // server name from TLS ClientHello
+	JA3Hash    string // JA3 fingerprint of TLS ClientHello, "" if not TLS
+	IsQUIC     bool   // true when UDP 443 payload looks like a QUIC Initial packet
 	// DNS response enrichment (port-53 responses only).
-	DNSNXDomain   bool   // true when response code is NXDOMAIN (3)
-	DNSMinRespTTL uint32 // minimum A/AAAA record TTL in the response; 0 means no A/AAAA answers
+	DNSNXDomain    bool   // true when response code is NXDOMAIN (3)
+	DNSMinRespTTL  uint32 // minimum A/AAAA record TTL in the response
+	DNSRespTTLSeen bool   // true when an A/AAAA TTL was observed, including TTL=0
 	// HTTP/1.1 enrichment (TCP only, first packet of a request/response).
 	HTTPMethod    string // "GET", "POST", "CONNECT", … — "" if not HTTP
 	HTTPHost      string // HTTP Host header value
@@ -113,11 +117,32 @@ func CapturePackets(ctx context.Context, iface, bpfFilter string) (<-chan Packet
 // SNI- and JA3-fingerprinted. Reassembled events are forwarded on ch alongside
 // regular packet events.
 func drainPackets(ctx context.Context, handle *pcap.Handle, ch chan<- PacketEvent, exitOnEOF bool) {
-	defer close(ch)
-	defer handle.Close()
-
 	src := gopacket.NewPacketSource(handle, handle.LinkType())
 	src.NoCopy = true
+	drainPacketSource(ctx, src, ch, exitOnEOF, handle.Close, func() (uint64, error) {
+		stats, err := handle.Stats()
+		if err != nil {
+			return 0, err
+		}
+		if stats.PacketsDropped <= 0 {
+			return 0, nil
+		}
+		return uint64(stats.PacketsDropped), nil
+	})
+}
+
+// drainPacketSource contains the source-agnostic decoding loop. Live captures
+// provide a kernel-drop sampler; pure-Go offline readers leave it nil.
+func drainPacketSource(
+	ctx context.Context,
+	src *gopacket.PacketSource,
+	ch chan<- PacketEvent,
+	exitOnEOF bool,
+	closeSource func(),
+	readKernelDrops func() (uint64, error),
+) {
+	defer close(ch)
+	defer closeSource()
 
 	// TCP reassembler for fragmented TLS ClientHellos.
 	reassembler, sniCh := NewStreamReassembler()
@@ -140,6 +165,7 @@ func drainPackets(ctx context.Context, handle *pcap.Handle, ch chan<- PacketEven
 	// capture.packet_buffer_size or reduce traffic if this fires repeatedly.
 	bufCap := cap(ch)
 	var highFillSince time.Time
+	var lastKernelDrops uint64 // pcap stats are cumulative per handle
 
 	// forward drains any pending reassembly results onto ch (non-blocking per item).
 	forward := func() {
@@ -170,12 +196,14 @@ func drainPackets(ctx context.Context, handle *pcap.Handle, ch chan<- PacketEven
 			forward()
 			return
 		case <-statsTicker:
-			if stats, err := handle.Stats(); err == nil {
-				prev := droppedPackets.Swap(uint64(stats.PacketsDropped))
-				if uint64(stats.PacketsDropped) > prev {
+			if current, err := readKernelDrops(); err == nil {
+				if current > lastKernelDrops {
+					delta := current - lastKernelDrops
+					total := droppedPackets.Add(delta)
 					log.Printf("capture: kernel dropped %d packets (total %d) — consider reducing capture load or increasing buffer",
-						uint64(stats.PacketsDropped)-prev, stats.PacketsDropped)
+						delta, total)
 				}
+				lastKernelDrops = current
 			}
 			// Warn when the packet channel fill ratio exceeds bufWarnThreshold
 			// for more than 5 s — the consumer is falling behind the producer.
@@ -273,13 +301,13 @@ func parsePacket(pkt gopacket.Packet) *PacketEvent {
 		srcPort = uint16(tl.SrcPort)
 		dstPort = uint16(tl.DstPort)
 		proto = "TCP"
-		payloadLen = uint32(len(tl.Payload))
+		payloadLen = uint32(len(tl.Payload)) // #nosec G115 -- libpcap payloads are bounded by the capture snap length.
 		tcpPayload = tl.Payload
 	case *layers.UDP:
 		srcPort = uint16(tl.SrcPort)
 		dstPort = uint16(tl.DstPort)
 		proto = "UDP"
-		payloadLen = uint32(len(tl.Payload))
+		payloadLen = uint32(len(tl.Payload)) // #nosec G115 -- libpcap payloads are bounded by the capture snap length.
 		// Store UDP payload for QUIC detection below.
 		if (srcPort == 443 || dstPort == 443) && len(tl.Payload) >= 5 {
 			tcpPayload = tl.Payload // reuse variable — only set for UDP 443
@@ -306,7 +334,7 @@ func parsePacket(pkt gopacket.Packet) *PacketEvent {
 	// DNS query + response extraction — port 53 only.
 	if dstPort == 53 || srcPort == 53 {
 		event.DNSQuery = extractDNSQuery(pkt)
-		event.DNSNXDomain, event.DNSMinRespTTL = extractDNSResponse(pkt)
+		event.DNSNXDomain, event.DNSMinRespTTL, event.DNSRespTTLSeen = extractDNSResponse(pkt)
 	}
 
 	// TLS / HTTP enrichment — TCP only.
@@ -402,8 +430,8 @@ func extractDNSQuery(pkt gopacket.Packet) string {
 // extractDNSResponse inspects a DNS response packet (QR=1) and returns:
 //   - nxdomain: true when the response code is NXDOMAIN (3)
 //   - minTTL:   the minimum TTL of all A/AAAA records in the answer section;
-//               0 means no A/AAAA records were present (e.g. pure NXDOMAIN)
-func extractDNSResponse(pkt gopacket.Packet) (nxdomain bool, minTTL uint32) {
+//     0 means no A/AAAA records were present (e.g. pure NXDOMAIN)
+func extractDNSResponse(pkt gopacket.Packet) (nxdomain bool, minTTL uint32, found bool) {
 	dnsLayer := pkt.Layer(layers.LayerTypeDNS)
 	if dnsLayer == nil {
 		return
@@ -417,7 +445,6 @@ func extractDNSResponse(pkt gopacket.Packet) (nxdomain bool, minTTL uint32) {
 	// TTL=0 is a valid value (instantaneous expiry, used in fast-flux DNS).
 	// Using 0 as "not set" would incorrectly allow later higher-TTL records to
 	// overwrite a legitimate TTL=0, causing us to miss the extreme fast-flux case.
-	found := false
 	for _, ans := range dns.Answers {
 		if ans.Type == layers.DNSTypeA || ans.Type == layers.DNSTypeAAAA {
 			if !found || ans.TTL < minTTL {
@@ -425,9 +452,6 @@ func extractDNSResponse(pkt gopacket.Packet) (nxdomain bool, minTTL uint32) {
 				found = true
 			}
 		}
-	}
-	if !found {
-		minTTL = 0 // caller convention: 0 means no A/AAAA records present
 	}
 	return
 }

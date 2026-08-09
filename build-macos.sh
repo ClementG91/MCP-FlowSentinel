@@ -48,16 +48,17 @@ fi
 ok "Homebrew: $(brew --version | head -1)"
 
 # ── Step 3: Check Go ──────────────────────────────────────────────────────────
-step "Checking Go (>= 1.22)..."
+step "Checking Go (>= 1.25.12)..."
 if ! command -v go &>/dev/null; then
     warn "Go not found — installing via Homebrew..."
     brew install go
 fi
 
-GO_VERSION="$(go version | grep -oE '[0-9]+\.[0-9]+' | head -1)"
-GO_MAJOR="$(echo "$GO_VERSION" | cut -d. -f1)"
-GO_MINOR="$(echo "$GO_VERSION" | cut -d. -f2)"
-if [[ $GO_MAJOR -lt 1 || ($GO_MAJOR -eq 1 && $GO_MINOR -lt 22) ]]; then
+GO_VERSION="$(go env GOVERSION | sed 's/^go//')"
+IFS=. read -r GO_MAJOR GO_MINOR GO_PATCH <<< "$GO_VERSION"
+GO_PATCH="${GO_PATCH%%[^0-9]*}"
+GO_PATCH="${GO_PATCH:-0}"
+if [[ $GO_MAJOR -lt 1 || ($GO_MAJOR -eq 1 && ($GO_MINOR -lt 25 || ($GO_MINOR -eq 25 && $GO_PATCH -lt 12))) ]]; then
     warn "Go $GO_VERSION too old — upgrading..."
     brew upgrade go
 fi

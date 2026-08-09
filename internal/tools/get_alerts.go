@@ -62,8 +62,8 @@ func getAlertsHandler(_ context.Context, req mcp.CallToolRequest) (*mcp.CallTool
 	}
 
 	type response struct {
-		AlertLogPath string               `json:"alert_log_path"`
-		TotalAlerts  int                  `json:"total_alerts"`
+		AlertLogPath string                 `json:"alert_log_path"`
+		TotalAlerts  int                    `json:"total_alerts"`
 		Alerts       []alerting.AlertRecord `json:"alerts"`
 	}
 

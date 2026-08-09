@@ -1,6 +1,6 @@
 # FlowRecord JSON Schema
 
-Every flow emitted by MCP-FlowSentinel — whether from `scan_network`, `get_flow_history`, `live_watch`, or the webhook — uses the same `FlowRecord` JSON object. This document describes every field.
+Every flow emitted by MCP-FlowSentinel — whether from `analyze_network`, `analyze_pcap`, `get_flow_history`, `live_watch`, or a webhook — uses the same `FlowRecord` JSON object. This document describes every field.
 
 ---
 
@@ -12,7 +12,7 @@ Every flow emitted by MCP-FlowSentinel — whether from `scan_network`, `get_flo
 | `dst_ip` | string | yes | Destination IP address |
 | `src_port` | integer | yes | Source port (0–65535) |
 | `dst_port` | integer | yes | Destination port |
-| `protocol` | string | yes | `"TCP"`, `"UDP"`, or `"ICMPv4"` / `"ICMPv6"` |
+| `protocol` | string | yes | `"TCP"` or `"UDP"` |
 
 ---
 
@@ -94,9 +94,9 @@ Extracted from the TLS `Certificate` handshake message (first certificate in the
 
 | Field | Type | Description |
 |---|---|---|
-| `tls_cert_self_signed` | boolean | `true` when issuer CN == subject CN |
+| `tls_cert_self_signed` | boolean | `true` when the complete issuer and subject names match |
 | `tls_cert_expired` | boolean | `true` when `NotAfter < now` at capture time |
-| `tls_cert_valid_days` | integer | Days until expiry (negative = already expired) |
+| `tls_cert_valid_days` | integer | Total certificate validity window in days (`NotAfter - NotBefore`) |
 | `tls_cert_cn` | string | Subject Common Name |
 | `tls_cert_has_san` | boolean | `true` when at least one Subject Alternative Name extension is present |
 | `tls_cert_ip_cn` | boolean | `true` when the CN is a raw IP address (e.g. `"192.168.1.1"`) |
@@ -122,7 +122,8 @@ Populated for flows carrying DNS traffic (UDP/TCP port 53).
 | Field | Type | Description |
 |---|---|---|
 | `nxdomain_count` | integer | Number of NXDOMAIN responses in this flow |
-| `min_dns_ttl` | integer | Lowest A/AAAA TTL seen in responses (seconds). `0` means no A/AAAA answers were observed. Very low values (1–10 s) indicate fast-flux or DGA domains. |
+| `min_dns_ttl` | integer | Lowest A/AAAA TTL seen in responses (seconds). A real zero TTL is preserved. |
+| `dns_resp_ttl_seen` | boolean | `true` when at least one A/AAAA answer was observed; distinguishes a real `min_dns_ttl: 0` from no address answer. |
 
 ---
 

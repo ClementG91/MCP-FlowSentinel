@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"regexp"
 	"sync/atomic"
 	"time"
@@ -123,24 +124,15 @@ func analyzeNetworkHandler(ctx context.Context, req mcp.CallToolRequest) (*mcp.C
 	agg := &aggregate.Aggregator{}
 	var totalPackets int64
 	for pkt := range pktCh {
-		agg.Add(aggregate.PacketEvent{
-			SrcIP:      pkt.SrcIP,
-			DstIP:      pkt.DstIP,
-			SrcPort:    pkt.SrcPort,
-			DstPort:    pkt.DstPort,
-			Proto:      pkt.Proto,
-			PayloadLen: pkt.PayloadLen,
-			Timestamp:  pkt.Timestamp,
-			DNSQuery:   pkt.DNSQuery,
-			TLSSNIName: pkt.TLSSNIName,
-			JA3Hash:    pkt.JA3Hash,
-		})
+		agg.Add(aggregate.FromCapturePacket(pkt, ifaceName))
 		totalPackets++
 	}
 
 	// ── Score, filter, summarise ─────────────────────────────────────────────
 	allFlows := agg.Finalize(resolver, nil)
-	history.Append("live:"+ifaceName, allFlows)
+	if err := history.Append("live:"+ifaceName, allFlows); err != nil {
+		log.Printf("analyze_network: persist history: %v", err)
+	}
 	summary := aggregate.Summarise(allFlows) // summary over ALL flows before filtering
 	flows := aggregate.FilterOptions{MinScore: minScore, TopN: topN}.Apply(allFlows)
 

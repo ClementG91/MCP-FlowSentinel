@@ -216,7 +216,7 @@ func saveIPRepToDisk(exact map[string]ipRepEntry, ranges []ipRepRange) {
 	if err != nil {
 		return
 	}
-	if err := os.WriteFile(ipRepCachePath, data, 0o640); err != nil {
+	if err := os.WriteFile(ipRepCachePath, data, 0o600); err != nil {
 		log.Printf("iprep: write cache: %v", err)
 	}
 }
@@ -254,8 +254,6 @@ func loadIPRepFromDisk() {
 	ipRepMu.Lock()
 	ipRepLive = &ipRepState{exact: newExact, ranges: newRanges}
 	ipRepMu.Unlock()
-	log.Printf("iprep: restored %d entries from disk cache (updated %s ago)",
-		total, time.Since(cache.UpdatedAt).Round(time.Minute))
 }
 
 func ipRepSourceLabel(url string) (source, label string) {

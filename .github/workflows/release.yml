@@ -6,19 +6,44 @@ on:
       - "v*"
 
 permissions:
-  contents: write
-  id-token: write  # required for SLSA / SBOM attestation (future use)
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
+  verify:
+    name: Verify release source
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: "1.25.12"
+          cache: true
+      - name: Install libpcap
+        run: sudo apt-get update -qq && sudo apt-get install -y libpcap-dev
+      - name: Verify module files are tidy
+        run: go mod tidy -diff
+      - name: Run vet
+        run: go vet ./...
+      - name: Run tests with race detector
+        run: go test -race -shuffle=on ./...
+      - name: Check known vulnerabilities
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.6.0 ./...
+
   # ── Linux amd64 ──────────────────────────────────────────────────────────────
   build-linux-amd64:
     name: Build linux/amd64
+    needs: verify
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
-          go-version: "1.25"
+          go-version: "1.25.12"
           cache: true
       - name: Install libpcap
         run: sudo apt-get update -qq && sudo apt-get install -y libpcap-dev
@@ -29,7 +54,7 @@ jobs:
             go build -trimpath \
             -ldflags "-s -w -X main.version=${GITHUB_REF_NAME}" \
             -o dist/mcp-flowsentinel-linux-amd64 .
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
           name: bin-linux-amd64
           path: dist/
@@ -37,12 +62,13 @@ jobs:
   # ── Linux arm64 (native GitHub ARM runner) ───────────────────────────────────
   build-linux-arm64:
     name: Build linux/arm64
+    needs: verify
     runs-on: ubuntu-24.04-arm
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
-          go-version: "1.25"
+          go-version: "1.25.12"
           cache: true
       - name: Install libpcap
         run: sudo apt-get update -qq && sudo apt-get install -y libpcap-dev
@@ -53,20 +79,21 @@ jobs:
             go build -trimpath \
             -ldflags "-s -w -X main.version=${GITHUB_REF_NAME}" \
             -o dist/mcp-flowsentinel-linux-arm64 .
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
           name: bin-linux-arm64
           path: dist/
 
-  # ── macOS Intel (macos-13 is the last Intel runner) ──────────────────────────
+  # ── macOS Intel ──────────────────────────────────────────────────────────────
   build-darwin-amd64:
     name: Build darwin/amd64
-    runs-on: macos-13
+    needs: verify
+    runs-on: macos-15-intel
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
-          go-version: "1.25"
+          go-version: "1.25.12"
           cache: true
       - name: Install libpcap
         run: brew install libpcap
@@ -77,7 +104,7 @@ jobs:
             go build -trimpath \
             -ldflags "-s -w -X main.version=${GITHUB_REF_NAME}" \
             -o dist/mcp-flowsentinel-darwin-amd64 .
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
           name: bin-darwin-amd64
           path: dist/
@@ -85,12 +112,13 @@ jobs:
   # ── macOS Apple Silicon (macos-latest = ARM runner) ──────────────────────────
   build-darwin-arm64:
     name: Build darwin/arm64
+    needs: verify
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
-          go-version: "1.25"
+          go-version: "1.25.12"
           cache: true
       - name: Install libpcap
         run: brew install libpcap
@@ -101,7 +129,7 @@ jobs:
             go build -trimpath \
             -ldflags "-s -w -X main.version=${GITHUB_REF_NAME}" \
             -o dist/mcp-flowsentinel-darwin-arm64 .
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
           name: bin-darwin-arm64
           path: dist/
@@ -111,18 +139,20 @@ jobs:
   # and avoid the Npcap driver installation requirement at compile time.
   build-windows-amd64:
     name: Build windows/amd64
+    needs: verify
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
-          go-version: "1.25"
+          go-version: "1.25.12"
           cache: true
       - name: Install cross-compile toolchain
         run: sudo apt-get update -qq && sudo apt-get install -y mingw-w64 unzip
       - name: Download Npcap SDK
         run: |
-          curl -sL https://npcap.com/dist/npcap-sdk-1.13.zip -o npcap-sdk.zip
+          curl -fsSL https://npcap.com/dist/npcap-sdk-1.13.zip -o npcap-sdk.zip
+          echo "dad1f2bf1b02b787be08ca4862f99e39a876c1f274bac4ac0cedc9bbc58f94fd  npcap-sdk.zip" | sha256sum -c -
           unzip -q npcap-sdk.zip -d npcap-sdk
       - name: Build
         env:
@@ -134,7 +164,7 @@ jobs:
             go build -trimpath \
             -ldflags "-s -w -X main.version=${GITHUB_REF_NAME}" \
             -o dist/mcp-flowsentinel-windows-amd64.exe .
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
           name: bin-windows-amd64
           path: dist/
@@ -149,35 +179,32 @@ jobs:
       - build-darwin-arm64
       - build-windows-amd64
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
 
       - name: Download all binaries
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6
         with:
           path: dist/
           merge-multiple: true
 
-      - uses: actions/setup-go@v5
-        with:
-          go-version: "1.25"
-          cache: false  # no Go source on this runner, cache not needed
-
       - name: Generate SBOM (SPDX JSON)
-        # syft generates a Software Bill of Materials from the Go module graph.
-        # The SPDX-JSON format is supported by GitHub's dependency submission API
-        # and all major SBOM consumers (Grype, TERN, DependencyTrack, etc.).
-        run: |
-          curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh | sh -s -- -b /usr/local/bin
-          syft . -o spdx-json=dist/sbom.spdx.json
-          echo "SBOM generated: $(wc -l < dist/sbom.spdx.json) lines"
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0
+        with:
+          path: .
+          format: spdx-json
+          output-file: dist/sbom.spdx.json
+          upload-artifact: false
+          upload-release-assets: false
 
       - name: Generate SHA256 checksums
         working-directory: dist
-        run: sha256sum * > SHA256SUMS.txt && cat SHA256SUMS.txt
+        run: sha256sum ./* > SHA256SUMS.txt && cat SHA256SUMS.txt
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           files: dist/*
           generate_release_notes: true

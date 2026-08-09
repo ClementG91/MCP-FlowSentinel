@@ -12,7 +12,7 @@
 package ja3
 
 import (
-	"crypto/md5"
+	"crypto/md5" // #nosec G501 -- JA3 compatibility requires the protocol-defined MD5 digest.
 	"encoding/hex"
 	"fmt"
 	"strings"
@@ -112,11 +112,11 @@ func LookupWithCustom(hash string, extraHashes []string) (string, bool) {
 
 // clientHello holds the parsed fields required for JA3 computation.
 type clientHello struct {
-	version            uint16
-	cipherSuites       []uint16
-	extensions         []uint16
-	ellipticCurves     []uint16
-	ecPointFormats     []uint8
+	version        uint16
+	cipherSuites   []uint16
+	extensions     []uint16
+	ellipticCurves []uint16
+	ecPointFormats []uint8
 }
 
 // computeJA3 produces the final MD5 hash from a parsed ClientHello.
@@ -128,7 +128,7 @@ func computeJA3(ch clientHello) string {
 		joinUint16(ch.ellipticCurves),
 		joinUint8(ch.ecPointFormats),
 	)
-	sum := md5.Sum([]byte(s))
+	sum := md5.Sum([]byte(s)) // #nosec G401 -- JA3 compatibility requires the protocol-defined MD5 digest.
 	return hex.EncodeToString(sum[:])
 }
 

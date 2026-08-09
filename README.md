@@ -6,7 +6,10 @@ MCP-FlowSentinel is a [Model Context Protocol](https://modelcontextprotocol.io/)
 
 Works with **Claude Desktop, Cursor, Cline, Continue.dev, Zed, Windsurf**, and any other client that supports the MCP stdio transport.
 
-> **How this was built:** this project was developed primarily through [vibe coding](https://en.wikipedia.org/wiki/Vibe_coding) — iterative AI-assisted development with Claude Code. The design, architecture decisions, and implementation were driven by prompting rather than traditional hand-coding. Security-sensitive components (packet parsers, scoring logic) have unit tests and fuzz tests, but the codebase has not undergone a formal third-party security audit. Use accordingly.
+> **Security status:** packet parsers and scoring paths are covered by unit, race,
+> fuzz-seed, static-analysis, and vulnerability checks. The project has not yet
+> undergone a formal third-party security audit and should complement—not
+> replace—an EDR, firewall, IDS, or professional incident-response workflow.
 
 ![CI](https://github.com/ClementG91/MCP-FlowSentinel/actions/workflows/ci.yml/badge.svg)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
@@ -29,9 +32,16 @@ Works with **Claude Desktop, Cursor, Cline, Continue.dev, Zed, Windsurf**, and a
 
 ---
 
-## Install (no Go required)
+## Install
 
-### Windows
+The installers below download the latest published GitHub release and verify its
+SHA-256 checksum before replacing an existing binary. They require at least one
+entry on the [Releases page](https://github.com/ClementG91/MCP-FlowSentinel/releases).
+If no release is available yet, use [Build from source](#build-from-source).
+
+### Prebuilt release (no Go required)
+
+#### Windows
 
 ```powershell
 irm https://raw.githubusercontent.com/ClementG91/MCP-FlowSentinel/main/install.ps1 | iex
@@ -44,7 +54,7 @@ irm https://raw.githubusercontent.com/ClementG91/MCP-FlowSentinel/main/install.p
 >
 > The MCP server process must run with **Administrator** privileges for packet capture to work.
 
-### Linux
+#### Linux
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/ClementG91/MCP-FlowSentinel/main/install.sh | bash
@@ -52,7 +62,7 @@ curl -fsSL https://raw.githubusercontent.com/ClementG91/MCP-FlowSentinel/main/in
 
 The script auto-installs `libpcap` via your package manager and grants `cap_net_raw` so you don't need to run as root.
 
-### macOS
+#### macOS
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/ClementG91/MCP-FlowSentinel/main/install.sh | bash
@@ -60,7 +70,7 @@ curl -fsSL https://raw.githubusercontent.com/ClementG91/MCP-FlowSentinel/main/in
 
 Requires [Homebrew](https://brew.sh). The script installs `libpcap` automatically.
 
-### Manual download
+#### Manual download
 
 Grab the latest binary for your platform from the [Releases page](https://github.com/ClementG91/MCP-FlowSentinel/releases).
 
@@ -81,6 +91,10 @@ mcp-flowsentinel --update
 ```
 
 Checks GitHub for a newer release and replaces the binary in-place. Set `GITHUB_TOKEN` to avoid rate limits when running multiple instances.
+
+Self-update is available only when a release exists. The updater verifies the
+download against the release's `SHA256SUMS.txt` and restores the previous binary
+if replacement fails.
 
 ---
 
@@ -133,11 +147,11 @@ Reload the window (`Ctrl+Shift+P` → *Developer: Reload Window*) after editing.
 
 ### Cline (VS Code)
 
-Open VS Code settings (`Ctrl+,`), search for **Cline MCP**, click *Edit in settings.json*, and add:
+Open the Cline panel, choose **MCP Servers → Configure MCP Servers**, and merge:
 
 ```json
 {
-  "cline.mcpServers": {
+  "mcpServers": {
     "flowsentinel": {
       "command": "/absolute/path/to/mcp-flowsentinel",
       "args": []
@@ -146,25 +160,27 @@ Open VS Code settings (`Ctrl+,`), search for **Cline MCP**, click *Edit in setti
 }
 ```
 
+For Cline CLI, the equivalent interactive command is:
+
+```bash
+cline mcp install flowsentinel -- /absolute/path/to/mcp-flowsentinel
+```
+
 ---
 
 ### Continue.dev
 
-**Config file:** `~/.continue/config.json`
+**Config file:** `~/.continue/config.yaml`
 
-```json
-{
-  "mcpServers": [
-    {
-      "name": "flowsentinel",
-      "transport": {
-        "type": "stdio",
-        "command": "/absolute/path/to/mcp-flowsentinel",
-        "args": []
-      }
-    }
-  ]
-}
+```yaml
+name: Local configuration
+version: 1.0.0
+schema: v1
+
+mcpServers:
+  - name: flowsentinel
+    command: /absolute/path/to/mcp-flowsentinel
+    args: []
 ```
 
 ---
@@ -177,10 +193,8 @@ Open VS Code settings (`Ctrl+,`), search for **Cline MCP**, click *Edit in setti
 {
   "context_servers": {
     "flowsentinel": {
-      "command": {
-        "path": "/absolute/path/to/mcp-flowsentinel",
-        "args": []
-      }
+      "command": "/absolute/path/to/mcp-flowsentinel",
+      "args": []
     }
   }
 }
@@ -494,6 +508,9 @@ This writes a fully commented `~/.config/mcp-flowsentinel/config.yaml` with ever
 
 ### Key config sections
 
+This is an abbreviated operational example. Run `--init-config` for the
+authoritative, fully commented list of supported fields.
+
 ```yaml
 # ─── Detection Engine ────────────────────────────────────────────────────
 scoring:
@@ -563,6 +580,8 @@ alerting:
   webhook_url: "https://hooks.slack.com/services/T.../B.../..."
   min_score_threshold: 7.0
   deduplication_window_seconds: 300
+  max_alerts_per_minute: 60
+  webhook_secret: ""                 # optional HMAC-SHA256 signing secret
 
 # ─── Daemon Mode ─────────────────────────────────────────────────────────
 daemon:
@@ -605,7 +624,7 @@ dom_rep:
 # ─── Prometheus metrics (optional) ───────────────────────────────────────
 metrics:
   enabled: false
-  listen_addr: ":9200"
+  listen_addr: "127.0.0.1:9200"
 ```
 
 ### Environment variable priority
@@ -707,7 +726,7 @@ chmod +x build-macos.sh && ./build-macos.sh
 ```
 
 ### Requirements
-- Go 1.22+
+- Go 1.25.12+
 - CGO enabled
 - libpcap dev headers (`libpcap-dev` on Debian/Ubuntu, `libpcap` via Homebrew on macOS)
 - Windows: [Npcap SDK](https://npcap.com/#download) + GCC (MinGW-w64)
@@ -725,7 +744,6 @@ internal/
               reader.go             Offline pcap reader
               reassembly.go         TCP stream reassembly for fragmented TLS ClientHellos
               http.go               HTTP/1.1 + HTTP/2 preface + gRPC frame detection
-              tls.go                TLS SNI extraction (hand-rolled ClientHello parser)
               tls_cert.go           TLS ServerCertificate parsing (crypto/x509)
               ssh.go                SSH HASSH fingerprinting (RFC 4253 KEXINIT parser)
               hassh_feed.go         Dynamic HASSH feed: static built-ins + URL/file feed + disk cache
@@ -743,6 +761,7 @@ internal/
   alerting/   alerting.go           Webhook notifications with deduplication + HMAC signing
               store.go              Persistent alert log (JSONL) + GetAlerts query
   daemon/     daemon.go             Continuous background capture loop; baseline init; feed updater goroutines
+  metrics/    metrics.go            Prometheus metrics and health endpoint
   updater/    updater.go            Self-update from GitHub Releases
   cache/      lru.go                Generic bounded LRU cache (DNS PTR, GeoIP)
   tools/      register.go           MCP tool registration
@@ -797,6 +816,28 @@ Packet stream (libpcap)
 
 ---
 
+## Limitations and data handling
+
+- Encrypted TLS, SSH, QUIC, and HTTPS payloads are not decrypted. Detection uses
+  observable metadata, protocol handshakes, fingerprints, timing, and process
+  context.
+- JA3, JA3S, and HASSH use protocol-defined MD5 fingerprints for compatibility;
+  MD5 is not used for passwords, signatures, or integrity protection. Custom or
+  randomized fingerprints can evade matching.
+- Process attribution is best-effort. Short-lived sockets, privileged processes,
+  NAT, containers, and OS timing can leave a flow unattributed.
+- Detection scores are heuristics, not verdicts. Tune exemptions and thresholds
+  for your environment and investigate high scores before taking action.
+- PCAPs, process command lines, history files, and webhook bodies may contain
+  sensitive operational data. Protect them accordingly.
+- Threat feeds and VirusTotal are opt-in. VirusTotal lookup sends a binary's
+  SHA-256 hash, not the binary itself.
+
+See [SECURITY.md](SECURITY.md) for vulnerability reporting and deployment
+guidance.
+
+---
+
 ## Npcap on Windows — FAQ
 
 **Why can't you auto-install Npcap?**
@@ -818,7 +859,6 @@ Not on Windows. On Linux use `cap_net_raw` (the installer sets this). On macOS, 
 Contributions are welcome! See [CONTRIBUTING.md](CONTRIBUTING.md) for how to get started.
 
 - [Open an issue](https://github.com/ClementG91/MCP-FlowSentinel/issues)
-- [Start a discussion](https://github.com/ClementG91/MCP-FlowSentinel/discussions)
 - [Submit a pull request](https://github.com/ClementG91/MCP-FlowSentinel/pulls)
 
 ---

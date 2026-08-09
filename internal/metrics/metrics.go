@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
 var (
@@ -24,7 +25,7 @@ var (
 	flowsScoredClean    atomic.Int64
 	alertsFiredTotal    atomic.Int64
 	webhookFailures     atomic.Int64
-	droppedPackets      atomic.Int64
+	droppedPackets      atomic.Uint64
 	windowDurationsSum  atomic.Int64 // milliseconds
 	windowDurationsN    atomic.Int64
 
@@ -47,7 +48,7 @@ func RecordAlert() { alertsFiredTotal.Add(1) }
 func RecordWebhookFailure() { webhookFailures.Add(1) }
 
 // RecordDroppedPackets sets the dropped-packets gauge to the given value.
-func RecordDroppedPackets(n uint64) { droppedPackets.Store(int64(n)) }
+func RecordDroppedPackets(n uint64) { droppedPackets.Store(n) }
 
 // RecordWindowDuration records a capture-window duration in milliseconds.
 func RecordWindowDuration(ms int64) {
@@ -65,7 +66,14 @@ func Serve(addr string) {
 			w.WriteHeader(http.StatusOK)
 			_, _ = w.Write([]byte("ok"))
 		})
-		srv := &http.Server{Addr: addr, Handler: mux}
+		srv := &http.Server{
+			Addr:              addr,
+			Handler:           mux,
+			ReadHeaderTimeout: 5 * time.Second,
+			ReadTimeout:       10 * time.Second,
+			WriteTimeout:      10 * time.Second,
+			IdleTimeout:       60 * time.Second,
+		}
 		go func() {
 			log.Printf("metrics: serving Prometheus metrics on http://%s/metrics", addr)
 			if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {

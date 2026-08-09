@@ -336,7 +336,7 @@ func TestPath_ReturnsNonEmpty(t *testing.T) {
 
 // ─── Error path coverage ──────────────────────────────────────────────────────
 
-func TestAppend_InvalidPath_SilentlyIgnored(t *testing.T) {
+func TestAppend_InvalidPath_ReturnsError(t *testing.T) {
 	// Direct mutation of histPath to a path inside a non-existent subdirectory.
 	// os.OpenFile will fail; Append must return without panicking.
 	mu.Lock()
@@ -349,8 +349,9 @@ func TestAppend_InvalidPath_SilentlyIgnored(t *testing.T) {
 		mu.Unlock()
 	}()
 
-	// Must not panic — write errors are silently swallowed.
-	Append("source", []aggregate.FlowRecord{makeFlow("1.1.1.1", "2.2.2.2", "proc", 1.0)})
+	if err := Append("source", []aggregate.FlowRecord{makeFlow("1.1.1.1", "2.2.2.2", "proc", 1.0)}); err == nil {
+		t.Fatal("expected write error for invalid history path")
+	}
 }
 
 func TestQuery_BadJSONLine_IsSkipped(t *testing.T) {
@@ -396,17 +397,19 @@ func TestQuery_AllFlowsFilteredOut_EntrySkipped(t *testing.T) {
 	}
 }
 
-func TestAppend_NaNScore_JsonMarshalError_SilentlyIgnored(t *testing.T) {
+func TestAppend_NaNScore_ReturnsMarshalError(t *testing.T) {
 	setup(t)
 
 	// math.NaN() in a float64 field causes json.Marshal to return an error.
-	// Append must silently ignore it.
+	// Append must report it without writing a corrupt line.
 	flows := []aggregate.FlowRecord{
 		makeFlow("1.1.1.1", "2.2.2.2", "proc", 0),
 	}
 	flows[0].SuspicionScore = math.NaN()
 
-	Append("source", flows) // must not panic
+	if err := Append("source", flows); err == nil {
+		t.Fatal("expected marshal error for NaN score")
+	}
 
 	entries, err := Query(QueryOpts{})
 	if err != nil {
@@ -659,6 +662,82 @@ func TestMergeIntoGzip_MergesWithExistingContent(t *testing.T) {
 	}
 }
 
+func TestMergeIntoGzip_IsIdempotent(t *testing.T) {
+	dir := t.TempDir()
+	gzPath := filepath.Join(dir, "test.jsonl.gz")
+	line := []byte(`{"source":"same"}`)
+	if err := mergeIntoGzip(gzPath, [][]byte{line}); err != nil {
+		t.Fatalf("first merge: %v", err)
+	}
+	if err := mergeIntoGzip(gzPath, [][]byte{line}); err != nil {
+		t.Fatalf("second merge: %v", err)
+	}
+	f, err := os.Open(gzPath)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer f.Close()
+	gr, err := gzip.NewReader(f)
+	if err != nil {
+		t.Fatalf("gzip: %v", err)
+	}
+	defer gr.Close()
+	scanner := bufio.NewScanner(gr)
+	count := 0
+	for scanner.Scan() {
+		count++
+	}
+	if err := scanner.Err(); err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("idempotent merge produced %d lines, want 1", count)
+	}
+}
+
+func TestQuery_ReadsEntryLargerThanLegacyScannerLimit(t *testing.T) {
+	setup(t)
+	largeName := strings.Repeat("x", 5<<20)
+	if err := Append("large", []aggregate.FlowRecord{makeFlow("1.1.1.1", "2.2.2.2", largeName, 1)}); err != nil {
+		t.Fatalf("Append: %v", err)
+	}
+	entries, err := Query(QueryOpts{})
+	if err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+	if len(entries) != 1 || entries[0].Flows[0].ProcessName != largeName {
+		t.Fatal("large valid history entry was not read back")
+	}
+}
+
+func TestPruneOld_EnforcesHardSizeCap(t *testing.T) {
+	setup(t)
+	original := config.Get()
+	cfg := *original
+	cfg.History.MaxSizeMB = 1
+	config.Set(&cfg)
+	defer config.Set(original)
+
+	largeName := strings.Repeat("x", 450<<10)
+	for i := 0; i < 3; i++ {
+		injectEntry(t, Entry{
+			SchemaVersion: currentSchemaVersion,
+			Timestamp:     time.Now().Add(time.Duration(i) * time.Second),
+			Source:        fmt.Sprintf("large-%d", i),
+			FlowCount:     1,
+			Flows:         []aggregate.FlowRecord{makeFlow("1.1.1.1", "2.2.2.2", largeName, 1)},
+		})
+	}
+	pruneOld()
+	info, err := os.Stat(histPath)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	if info.Size() > 1<<20 {
+		t.Fatalf("history size %d exceeds configured 1 MiB cap", info.Size())
+	}
+}
+
 func TestRotateOldEntriesToGzip_Disabled_Noop(t *testing.T) {
 	setup(t)
 	// CompressRotated is false by default — no .gz file must be created.
@@ -737,6 +816,9 @@ func TestQueryCompressedFiles_ReturnsEntriesFromGzip(t *testing.T) {
 	gzPath := filepath.Join(filepath.Dir(histPath), "history_"+day+".jsonl.gz")
 	if err := mergeIntoGzip(gzPath, [][]byte{b}); err != nil {
 		t.Fatalf("mergeIntoGzip: %v", err)
+	}
+	if err := os.Remove(histPath); err != nil {
+		t.Fatalf("remove hot history: %v", err)
 	}
 
 	// Query with a window that covers 3 days.
@@ -877,5 +959,39 @@ func TestRecurrenceMap_RespectsLookbackWindow(t *testing.T) {
 	m := RecurrenceMap(time.Now().Add(-1 * time.Hour))
 	if m[key] != 0 {
 		t.Errorf("expected recurrence=0 (entry older than lookback), got %d", m[key])
+	}
+}
+
+func TestRecurrenceMap_IncludesRotatedHistory(t *testing.T) {
+	setup(t)
+	restore := enableRotation(t, 7)
+	defer restore()
+
+	flow := makeFlow("10.0.0.1", "8.8.8.8", "beacon", 3)
+	flow.DstPort = 443
+	flow.Protocol = "TCP"
+	when := time.Now().UTC().Add(-25 * time.Hour)
+	entry := Entry{
+		SchemaVersion: currentSchemaVersion,
+		Timestamp:     when,
+		Source:        "rotated",
+		FlowCount:     1,
+		Flows:         []aggregate.FlowRecord{flow},
+	}
+	data, err := json.Marshal(entry)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	gzPath := filepath.Join(filepath.Dir(histPath), "history_"+when.Format("2006-01-02")+".jsonl.gz")
+	if err := mergeIntoGzip(gzPath, [][]byte{data}); err != nil {
+		t.Fatalf("merge: %v", err)
+	}
+	if err := os.Remove(histPath); err != nil {
+		t.Fatalf("remove hot history: %v", err)
+	}
+
+	key := RecurrenceKey(flow.SrcIP, flow.DstIP, flow.DstPort, flow.Protocol)
+	if got := RecurrenceMap(time.Now().Add(-48 * time.Hour))[key]; got != 1 {
+		t.Fatalf("rotated recurrence count = %d, want 1", got)
 	}
 }

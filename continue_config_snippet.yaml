@@ -1,0 +1,8 @@
+name: MCP-FlowSentinel
+version: 1.0.0
+schema: v1
+
+mcpServers:
+  - name: flowsentinel
+    command: /absolute/path/to/mcp-flowsentinel
+    args: []

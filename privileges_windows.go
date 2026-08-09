@@ -45,8 +45,8 @@ func checkPrivileges(binaryPath string) bool {
 // Uses only the standard-library syscall package — no external deps.
 func isWindowsAdmin() bool {
 	const (
-		tokenQuery      = 0x0008
-		tokenElevation  = 20 // TOKEN_INFORMATION_CLASS value
+		tokenQuery     = 0x0008
+		tokenElevation = 20 // TOKEN_INFORMATION_CLASS value
 	)
 
 	// kernel32!GetCurrentProcess returns a pseudo-handle; no Close needed.
