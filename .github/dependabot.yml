@@ -13,6 +13,11 @@ updates:
       go-dependencies:
         patterns:
           - "*"
+        exclude-patterns:
+          - "github.com/mark3labs/mcp-go"
+        update-types:
+          - minor
+          - patch
 
   - package-ecosystem: github-actions
     directory: /
@@ -26,3 +31,6 @@ updates:
       github-actions:
         patterns:
           - "*"
+        update-types:
+          - minor
+          - patch

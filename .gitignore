@@ -31,9 +31,14 @@ npcap-sdk*.zip
 .claude/
 .idea/
 .vscode/
+.fleet/
+.zed/
+*.swp
+*.swo
 .DS_Store
 Thumbs.db
 ehthumbs.db
+Desktop.ini
 
 # Local environment / secrets
 .env
@@ -43,5 +48,12 @@ ehthumbs.db
 
 # Go test / coverage output
 *.out
+*.coverprofile
 coverage*.html
 cov_*.html
+coverage/
+
+# Local Go workspaces and security reports
+go.work
+go.work.sum
+*.sarif

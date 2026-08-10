@@ -11,8 +11,21 @@ Works with **Claude Desktop, Cursor, Cline, Continue.dev, Zed, Windsurf**, and a
 > undergone a formal third-party security audit and should complement—not
 > replace—an EDR, firewall, IDS, or professional incident-response workflow.
 
-![CI](https://github.com/ClementG91/MCP-FlowSentinel/actions/workflows/ci.yml/badge.svg)
+[![CI](https://github.com/ClementG91/MCP-FlowSentinel/actions/workflows/ci.yml/badge.svg)](https://github.com/ClementG91/MCP-FlowSentinel/actions/workflows/ci.yml)
+[![Go Report Card](https://goreportcard.com/badge/github.com/ClementG91/MCP-FlowSentinel)](https://goreportcard.com/report/github.com/ClementG91/MCP-FlowSentinel)
+[![Go version](https://img.shields.io/github/go-mod/go-version/ClementG91/MCP-FlowSentinel?logo=go)](go.mod)
+[![Release](https://img.shields.io/github/v/release/ClementG91/MCP-FlowSentinel?sort=semver)](https://github.com/ClementG91/MCP-FlowSentinel/releases)
+[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/ClementG91/MCP-FlowSentinel/badge)](https://scorecard.dev/viewer/?uri=github.com/ClementG91/MCP-FlowSentinel)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Security policy](https://img.shields.io/badge/security-policy-blue.svg)](SECURITY.md)
+
+## Why FlowSentinel
+
+- **Local-first:** packet inspection and behavioral scoring run on your machine; encrypted payloads are never decrypted.
+- **Process-aware:** flows are correlated with the executable and process that owns each socket.
+- **Explainable detection:** 30+ bounded signals expose their reasons and mapped MITRE ATT&CK techniques instead of returning an opaque verdict.
+- **MCP-native:** one stdio server works with any standards-compatible MCP client on Windows, Linux, and macOS.
+- **Defense in depth:** race tests, static analysis, vulnerability scanning, pinned CI actions, release checksums, SBOMs, and build provenance protect the delivery chain.
 
 ---
 
@@ -856,10 +869,12 @@ Not on Windows. On Linux use `cap_net_raw` (the installer sets this). On macOS, 
 
 ## Contributing
 
-Contributions are welcome! See [CONTRIBUTING.md](CONTRIBUTING.md) for how to get started.
+Contributions are welcome! See [CONTRIBUTING.md](CONTRIBUTING.md) for how to get started and [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) for the community standards.
 
 - [Open an issue](https://github.com/ClementG91/MCP-FlowSentinel/issues)
 - [Submit a pull request](https://github.com/ClementG91/MCP-FlowSentinel/pulls)
+- [Get support](SUPPORT.md)
+- [Review the changelog](CHANGELOG.md)
 
 ---
 

@@ -180,7 +180,9 @@ jobs:
       - build-windows-amd64
     runs-on: ubuntu-latest
     permissions:
+      attestations: write
       contents: write
+      id-token: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -201,7 +203,12 @@ jobs:
 
       - name: Generate SHA256 checksums
         working-directory: dist
-        run: sha256sum ./* > SHA256SUMS.txt && cat SHA256SUMS.txt
+        run: sha256sum -- mcp-flowsentinel-* sbom.spdx.json > SHA256SUMS.txt && cat SHA256SUMS.txt
+
+      - name: Attest build provenance
+        uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1
+        with:
+          subject-checksums: dist/SHA256SUMS.txt
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
