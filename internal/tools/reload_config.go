@@ -6,13 +6,12 @@ import (
 	"fmt"
 
 	"github.com/ClementG91/MCP-FlowSentinel/internal/config"
-	"github.com/mark3labs/mcp-go/mcp"
-	"github.com/mark3labs/mcp-go/server"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
-func registerReloadConfig(s *server.MCPServer) {
-	s.AddTool(mcp.NewTool("reload_config",
-		mcp.WithDescription(`Reload the configuration file without restarting the server.
+func registerReloadConfig(s *mcp.Server) {
+	addTool(s, newTool("reload_config",
+		withDescription(`Reload the configuration file without restarting the server.
 
 Re-reads the YAML config from the last loaded path (or the default path if
 no file was loaded at startup). Useful after editing config values while the
@@ -25,10 +24,11 @@ Note: GeoIP database paths only take effect on restart. The DNS cache TTL
 and size also require a restart.
 
 Returns a summary of the reloaded configuration on success.`),
+		withBehavior("Reload configuration", false, true, false),
 	), reloadConfigHandler)
 }
 
-func reloadConfigHandler(_ context.Context, _ mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func reloadConfigHandler(_ context.Context, _ map[string]any) (*mcp.CallToolResult, error) {
 	cfg, err := config.Reload()
 	if err != nil {
 		return errorResult(fmt.Sprintf("config reload failed: %v", err)), nil
@@ -66,5 +66,5 @@ func reloadConfigHandler(_ context.Context, _ mcp.CallToolRequest) (*mcp.CallToo
 	if err != nil {
 		return errorResult(err.Error()), nil
 	}
-	return mcp.NewToolResultText(string(data)), nil
+	return textResult(string(data)), nil
 }

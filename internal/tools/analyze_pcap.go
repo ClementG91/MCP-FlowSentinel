@@ -15,47 +15,54 @@ import (
 	"github.com/ClementG91/MCP-FlowSentinel/internal/capture"
 	"github.com/ClementG91/MCP-FlowSentinel/internal/correlate"
 	"github.com/ClementG91/MCP-FlowSentinel/internal/history"
-	"github.com/mark3labs/mcp-go/mcp"
-	"github.com/mark3labs/mcp-go/server"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
-func registerAnalyzePcap(s *server.MCPServer) {
-	tool := mcp.NewTool("analyze_pcap",
-		mcp.WithDescription(
+func registerAnalyzePcap(s *mcp.Server) {
+	tool := newTool("analyze_pcap",
+		withDescription(
 			"Analyze an existing .pcap or .pcapng file offline. Reads all packets from the "+
 				"file, correlates flows with currently running processes (best-effort), applies "+
 				"the same suspicion scoring as analyze_network, and returns a JSON report sorted "+
 				"highest-risk first. Useful for forensic analysis of saved captures.",
 		),
-		mcp.WithString("file_path",
-			mcp.Required(),
-			mcp.Description("Absolute path to a .pcap or .pcapng capture file."),
+		withBehavior("Analyze a packet capture", false, false, false),
+		withString("file_path",
+			required(),
+			minLength(1),
+			maxLength(4096),
+			description("Absolute path to a .pcap or .pcapng capture file."),
 		),
-		mcp.WithString("bpf_filter",
-			mcp.Description(
+		withString("bpf_filter",
+			maxLength(4096),
+			description(
 				"Optional BPF filter expression applied while reading "+
 					"(e.g. 'tcp port 443', 'host 1.2.3.4'). Empty means read all packets.",
 			),
 		),
-		mcp.WithNumber("min_score",
-			mcp.Description(
+		withNumber("min_score",
+			minimum(0),
+			maximum(10),
+			defaultValue(0),
+			description(
 				"Only return flows with suspicion_score >= this value (0–10). "+
 					"Default: 0 (all flows). Use 2 to hide LOW noise, 5 to show HIGH+ only.",
 			),
 		),
-		mcp.WithNumber("top_n",
-			mcp.Description(
+		withInteger("top_n",
+			minimum(0),
+			maximum(10000),
+			defaultValue(0),
+			description(
 				"Return at most this many flows (highest score first). "+
 					"Default: 0 (unlimited). Use 20 to cap output size.",
 			),
 		),
 	)
-	s.AddTool(tool, analyzePcapHandler)
+	addTool(s, tool, analyzePcapHandler)
 }
 
-func analyzePcapHandler(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	args := req.GetArguments()
-
+func analyzePcapHandler(ctx context.Context, args map[string]any) (*mcp.CallToolResult, error) {
 	filePath, _ := args["file_path"].(string)
 	if filePath == "" {
 		return errorResult("'file_path' parameter is required"), nil
@@ -150,5 +157,5 @@ func analyzePcapHandler(ctx context.Context, req mcp.CallToolRequest) (*mcp.Call
 	if err != nil {
 		return errorResult("failed to encode response: " + err.Error()), nil
 	}
-	return mcp.NewToolResultText(string(out)), nil
+	return textResult(string(out)), nil
 }

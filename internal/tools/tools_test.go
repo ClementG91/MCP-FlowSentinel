@@ -21,8 +21,7 @@ import (
 	"github.com/ClementG91/MCP-FlowSentinel/internal/history"
 	"github.com/google/gopacket"
 	"github.com/google/gopacket/layers"
-	"github.com/mark3labs/mcp-go/mcp"
-	"github.com/mark3labs/mcp-go/server"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 	psnet "github.com/shirou/gopsutil/v3/net"
 	"github.com/shirou/gopsutil/v3/process"
 )
@@ -92,14 +91,9 @@ func toolsBuildIPv4TCPRaw(t *testing.T, srcIP, dstIP string, srcPort, dstPort ui
 
 // ─── helper ──────────────────────────────────────────────────────────────────
 
-// callReq builds a minimal mcp.CallToolRequest with the given arguments map.
-func callReq(args map[string]any) mcp.CallToolRequest {
-	return mcp.CallToolRequest{
-		Params: mcp.CallToolParams{
-			Arguments: args,
-		},
-	}
-}
+// callReq keeps handler tests focused on validated tool arguments rather than
+// coupling them to the SDK's wire request representation.
+func callReq(args map[string]any) map[string]any { return args }
 
 // resultText extracts the text from the first content item of a tool result.
 func resultText(t *testing.T, r *mcp.CallToolResult) string {
@@ -127,7 +121,7 @@ func resultText(t *testing.T, r *mcp.CallToolResult) string {
 func isErrorResult(t *testing.T, r *mcp.CallToolResult) bool {
 	t.Helper()
 	text := resultText(t, r)
-	return strings.Contains(text, `"error"`)
+	return r.IsError || strings.Contains(text, `"error"`)
 }
 
 // ─── analyze_network validation ──────────────────────────────────────────────
@@ -461,7 +455,7 @@ func TestSockProtoName(t *testing.T) {
 // ─── Register ─────────────────────────────────────────────────────────────────
 
 func TestRegister_RegistersAllTools_NoPanic(t *testing.T) {
-	s := server.NewMCPServer("test-server", "0.0.0")
+	s := mcp.NewServer(&mcp.Implementation{Name: "test-server", Version: "0.0.0"}, nil)
 	// Register must not panic even if pcap / procfs is unavailable.
 	Register(s)
 }
@@ -1141,12 +1135,11 @@ func TestVtLookup_ServerError(t *testing.T) {
 // ─── scan_process MCP handler ─────────────────────────────────────────────────
 
 func TestScanProcessHandler_CurrentProcess(t *testing.T) {
-	s := server.NewMCPServer("test", "0.0.0.1")
+	s := mcp.NewServer(&mcp.Implementation{Name: "test", Version: "0.0.0.1"}, nil)
 	registerScanProcess(s)
 
 	pid := float64(os.Getpid())
-	req := mcp.CallToolRequest{}
-	req.Params.Arguments = map[string]any{"pid": pid}
+	req := map[string]any{"pid": pid}
 
 	result, err := scanProcessHandler(context.Background(), req)
 	if err != nil {
@@ -1178,8 +1171,7 @@ func TestScanProcessHandler_CurrentProcess(t *testing.T) {
 }
 
 func TestScanProcessHandler_NoPIDOrName_ReturnsError(t *testing.T) {
-	req := mcp.CallToolRequest{}
-	req.Params.Arguments = map[string]any{}
+	req := map[string]any{}
 	result, err := scanProcessHandler(context.Background(), req)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -1191,8 +1183,7 @@ func TestScanProcessHandler_NoPIDOrName_ReturnsError(t *testing.T) {
 }
 
 func TestScanProcessHandler_NotFound_ReturnsError(t *testing.T) {
-	req := mcp.CallToolRequest{}
-	req.Params.Arguments = map[string]any{"process_name": "zzz_nonexistent_process_xyz_12345"}
+	req := map[string]any{"process_name": "zzz_nonexistent_process_xyz_12345"}
 	result, _ := scanProcessHandler(context.Background(), req)
 	text := resultText(t, result)
 	if !strings.Contains(text, "no process found") {
@@ -1203,8 +1194,7 @@ func TestScanProcessHandler_NotFound_ReturnsError(t *testing.T) {
 // ─── live_watch handler (no-capture path) ────────────────────────────────────
 
 func TestLiveWatchHandler_MissingInterface_ReturnsError(t *testing.T) {
-	req := mcp.CallToolRequest{}
-	req.Params.Arguments = map[string]any{
+	req := map[string]any{
 		"process_name": "test",
 	}
 	result, err := liveWatchHandler(context.Background(), req)
@@ -1218,8 +1208,7 @@ func TestLiveWatchHandler_MissingInterface_ReturnsError(t *testing.T) {
 }
 
 func TestLiveWatchHandler_MissingFilter_ReturnsError(t *testing.T) {
-	req := mcp.CallToolRequest{}
-	req.Params.Arguments = map[string]any{
+	req := map[string]any{
 		"interface": "eth0",
 		// no process_name or target_ip
 	}
@@ -1234,8 +1223,7 @@ func TestLiveWatchHandler_MissingFilter_ReturnsError(t *testing.T) {
 }
 
 func TestLiveWatchHandler_InvalidInterface_ReturnsError(t *testing.T) {
-	req := mcp.CallToolRequest{}
-	req.Params.Arguments = map[string]any{
+	req := map[string]any{
 		"interface":    "../../etc/passwd",
 		"process_name": "test",
 	}
@@ -1246,9 +1234,23 @@ func TestLiveWatchHandler_InvalidInterface_ReturnsError(t *testing.T) {
 	}
 }
 
+func TestLiveWatchHandler_InvalidTargetIP_ReturnsError(t *testing.T) {
+	req := map[string]any{
+		"interface": "eth0",
+		"target_ip": "1.2.3.4 or tcp port 22",
+	}
+	result, err := liveWatchHandler(context.Background(), req)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	text := resultText(t, result)
+	if !strings.Contains(text, "valid IPv4 or IPv6") {
+		t.Errorf("expected target IP validation error, got: %s", text)
+	}
+}
+
 func TestLiveWatchHandler_InterfaceTooLong_ReturnsError(t *testing.T) {
-	req := mcp.CallToolRequest{}
-	req.Params.Arguments = map[string]any{
+	req := map[string]any{
 		"interface":    strings.Repeat("a", 257),
 		"process_name": "test",
 	}

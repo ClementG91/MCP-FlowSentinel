@@ -14,55 +14,65 @@ import (
 	"github.com/ClementG91/MCP-FlowSentinel/internal/config"
 	"github.com/ClementG91/MCP-FlowSentinel/internal/correlate"
 	"github.com/ClementG91/MCP-FlowSentinel/internal/history"
-	"github.com/mark3labs/mcp-go/mcp"
-	"github.com/mark3labs/mcp-go/server"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
 // ifaceNameRE allows Unix-style (eth0, en0, lo) and Windows NPF GUIDs
 // (\Device\NPF_{...}) while rejecting shell metacharacters and path traversal.
 var ifaceNameRE = regexp.MustCompile(`^[A-Za-z0-9_.:\\\-{}]+$`)
 
-func registerAnalyzeNetwork(s *server.MCPServer) {
-	tool := mcp.NewTool("analyze_network",
-		mcp.WithDescription(
+func registerAnalyzeNetwork(s *mcp.Server) {
+	tool := newTool("analyze_network",
+		withDescription(
 			"Capture live network traffic on a named interface for a given duration, "+
 				"correlate each flow with the local process that owns it, compute a "+
 				"suspicion score (0–10), and return a JSON report sorted highest-risk first. "+
 				"Requires root/admin privileges. Use list_interfaces to find valid interface names.",
 		),
-		mcp.WithString("interface",
-			mcp.Required(),
-			mcp.Description("Network interface name (e.g. eth0, en0, lo)."),
+		withBehavior("Analyze live network traffic", false, false, true),
+		withString("interface",
+			required(),
+			minLength(1),
+			maxLength(256),
+			description("Network interface name (e.g. eth0, en0, lo)."),
 		),
-		mcp.WithNumber("duration_ms",
-			mcp.Description("Capture duration in milliseconds. Default: 5000 (5 s). Max: 60000."),
+		withNumber("duration_ms",
+			minimum(1),
+			maximum(60000),
+			defaultValue(5000),
+			description("Capture duration in milliseconds. Default: 5000 (5 s). Max: 60000."),
 		),
-		mcp.WithString("bpf_filter",
-			mcp.Description(
+		withString("bpf_filter",
+			maxLength(4096),
+			description(
 				"Optional BPF filter expression (e.g. 'tcp port 443', 'host 1.2.3.4'). "+
 					"Empty means capture all traffic.",
 			),
 		),
-		mcp.WithNumber("min_score",
-			mcp.Description(
+		withNumber("min_score",
+			minimum(0),
+			maximum(10),
+			defaultValue(0),
+			description(
 				"Only return flows with suspicion_score >= this value (0–10). "+
 					"Default: 0 (all flows). Use 2 to hide LOW noise, 5 to show HIGH+ only.",
 			),
 		),
-		mcp.WithNumber("top_n",
-			mcp.Description(
+		withInteger("top_n",
+			minimum(0),
+			maximum(10000),
+			defaultValue(0),
+			description(
 				"Return at most this many flows (highest score first). "+
 					"Default: 0 (unlimited). Use 20 to cap output size for busy interfaces.",
 			),
 		),
 	)
-	s.AddTool(tool, analyzeNetworkHandler)
+	addTool(s, tool, analyzeNetworkHandler)
 }
 
-func analyzeNetworkHandler(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func analyzeNetworkHandler(ctx context.Context, args map[string]any) (*mcp.CallToolResult, error) {
 	// ── Parse arguments ──────────────────────────────────────────────────────
-	args := req.GetArguments()
-
 	ifaceName, _ := args["interface"].(string)
 	if ifaceName == "" {
 		return errorResult("'interface' parameter is required"), nil
@@ -171,7 +181,7 @@ func analyzeNetworkHandler(ctx context.Context, req mcp.CallToolRequest) (*mcp.C
 	if err != nil {
 		return errorResult("failed to encode response: " + err.Error()), nil
 	}
-	return mcp.NewToolResultText(string(out)), nil
+	return textResult(string(out)), nil
 }
 
 // makeResolver builds the ProcessResolver closure from an atomic SocketTable pointer.

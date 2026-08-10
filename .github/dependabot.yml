@@ -14,7 +14,7 @@ updates:
         patterns:
           - "*"
         exclude-patterns:
-          - "github.com/mark3labs/mcp-go"
+          - "github.com/modelcontextprotocol/go-sdk"
         update-types:
           - minor
           - patch

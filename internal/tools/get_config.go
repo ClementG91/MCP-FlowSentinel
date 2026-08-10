@@ -5,13 +5,12 @@ import (
 	"encoding/json"
 
 	"github.com/ClementG91/MCP-FlowSentinel/internal/config"
-	"github.com/mark3labs/mcp-go/mcp"
-	"github.com/mark3labs/mcp-go/server"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
-func registerGetConfig(s *server.MCPServer) {
-	s.AddTool(mcp.NewTool("get_config",
-		mcp.WithDescription(`Return the current runtime configuration.
+func registerGetConfig(s *mcp.Server) {
+	addTool(s, newTool("get_config",
+		withDescription(`Return the current runtime configuration.
 
 Useful for verifying which settings are active without reading the config file
 directly. Secret values are never returned; only their configured state is shown.
@@ -20,10 +19,11 @@ Returns a JSON object with all configuration sections: scoring thresholds,
 capture timing, GeoIP paths, history retention, alerting settings, and
 daemon parameters. Also includes the path of the loaded config file (empty
 if using built-in defaults).`),
+		withBehavior("Get runtime configuration", true, true, false),
 	), getConfigHandler)
 }
 
-func getConfigHandler(_ context.Context, _ mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func getConfigHandler(_ context.Context, _ map[string]any) (*mcp.CallToolResult, error) {
 	cfg := config.Get()
 
 	// Build a complete sanitized view without exposing webhook or API secrets.
@@ -93,5 +93,5 @@ func getConfigHandler(_ context.Context, _ mcp.CallToolRequest) (*mcp.CallToolRe
 	if err != nil {
 		return errorResult(err.Error()), nil
 	}
-	return mcp.NewToolResultText(string(data)), nil
+	return textResult(string(data)), nil
 }

@@ -7,23 +7,23 @@ import (
 	"time"
 
 	"github.com/ClementG91/MCP-FlowSentinel/internal/correlate"
-	"github.com/mark3labs/mcp-go/mcp"
-	"github.com/mark3labs/mcp-go/server"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
-func registerGetProcessMap(s *server.MCPServer) {
-	tool := mcp.NewTool("get_process_map",
-		mcp.WithDescription(
+func registerGetProcessMap(s *mcp.Server) {
+	tool := newTool("get_process_map",
+		withDescription(
 			"Return a point-in-time snapshot of every process that has open network "+
 				"sockets, together with each socket's local/remote address and state. "+
 				"Useful for discovering which binaries are listening or connected right now "+
 				"without capturing traffic. Requires root/admin for full PID resolution.",
 		),
+		withBehavior("Get process network map", true, true, false),
 	)
-	s.AddTool(tool, getProcessMapHandler)
+	addTool(s, tool, getProcessMapHandler)
 }
 
-func getProcessMapHandler(_ context.Context, _ mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func getProcessMapHandler(_ context.Context, _ map[string]any) (*mcp.CallToolResult, error) {
 	byPID, err := correlate.GetAllConnections()
 	if err != nil {
 		return errorResult("get_process_map failed: " + err.Error()), nil
@@ -51,5 +51,5 @@ func getProcessMapHandler(_ context.Context, _ mcp.CallToolRequest) (*mcp.CallTo
 	if err != nil {
 		return errorResult("failed to encode response: " + err.Error()), nil
 	}
-	return mcp.NewToolResultText(string(out)), nil
+	return textResult(string(out)), nil
 }

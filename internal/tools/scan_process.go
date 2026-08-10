@@ -14,31 +14,34 @@ import (
 	"time"
 
 	"github.com/ClementG91/MCP-FlowSentinel/internal/config"
-	"github.com/mark3labs/mcp-go/mcp"
-	"github.com/mark3labs/mcp-go/server"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/shirou/gopsutil/v3/process"
 )
 
-func registerScanProcess(s *server.MCPServer) {
-	tool := mcp.NewTool("scan_process",
-		mcp.WithDescription(
+func registerScanProcess(s *mcp.Server) {
+	tool := newTool("scan_process",
+		withDescription(
 			"Deep-dive security scan of a process: SHA256 hash of the binary, "+
 				"binary location analysis (suspicious paths: /tmp, Downloads, home dirs), "+
 				"optional VirusTotal reputation lookup (requires intel.virustotal_api_key in config), "+
 				"loaded modules (Linux/macOS only), and a consolidated list of suspicious signals. "+
 				"Provide either pid or process_name.",
 		),
-		mcp.WithNumber("pid",
-			mcp.Description("Exact PID to scan. Takes precedence over process_name."),
+		withBehavior("Scan a process", true, true, true),
+		withInteger("pid",
+			minimum(1),
+			maximum(2147483647),
+			description("Exact PID to scan. Takes precedence over process_name."),
 		),
-		mcp.WithString("process_name",
-			mcp.Description(
+		withString("process_name",
+			maxLength(256),
+			description(
 				"Case-insensitive substring match against running process names. "+
 					"When multiple processes match, all are scanned.",
 			),
 		),
 	)
-	s.AddTool(tool, scanProcessHandler)
+	addTool(s, tool, scanProcessHandler)
 }
 
 // scanReport is the output for a single process security scan.
@@ -59,9 +62,7 @@ type scanReport struct {
 	ScannedAt         time.Time `json:"scanned_at"`
 }
 
-func scanProcessHandler(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	args := req.GetArguments()
-
+func scanProcessHandler(_ context.Context, args map[string]any) (*mcp.CallToolResult, error) {
 	var targetPID int32
 	if v, ok := args["pid"].(float64); ok && v > 0 {
 		targetPID = int32(v)
@@ -117,7 +118,7 @@ func scanProcessHandler(_ context.Context, req mcp.CallToolRequest) (*mcp.CallTo
 	if err != nil {
 		return errorResult("failed to encode response: " + err.Error()), nil
 	}
-	return mcp.NewToolResultText(string(out)), nil
+	return textResult(string(out)), nil
 }
 
 func buildScanReport(p *process.Process, vtKey string) scanReport {
