@@ -59,7 +59,7 @@ func registerLiveWatch(s *server.MCPServer) {
 }
 
 func liveWatchHandler(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	args := req.Params.Arguments
+	args := req.GetArguments()
 
 	ifaceName, _ := args["interface"].(string)
 	if ifaceName == "" {

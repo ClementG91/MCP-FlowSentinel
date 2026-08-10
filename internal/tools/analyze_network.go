@@ -61,7 +61,7 @@ func registerAnalyzeNetwork(s *server.MCPServer) {
 
 func analyzeNetworkHandler(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	// ── Parse arguments ──────────────────────────────────────────────────────
-	args := req.Params.Arguments
+	args := req.GetArguments()
 
 	ifaceName, _ := args["interface"].(string)
 	if ifaceName == "" {

@@ -54,7 +54,7 @@ func registerGetFlowHistory(s *server.MCPServer) {
 }
 
 func getFlowHistoryHandler(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	args := req.Params.Arguments
+	args := req.GetArguments()
 
 	opts := history.QueryOpts{}
 

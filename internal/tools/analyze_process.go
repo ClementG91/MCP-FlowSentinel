@@ -68,7 +68,7 @@ type enrichedConn struct {
 }
 
 func analyzeProcessHandler(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	args := req.Params.Arguments
+	args := req.GetArguments()
 
 	var targetPID int32
 	if v, ok := args["pid"].(float64); ok && v > 0 {
