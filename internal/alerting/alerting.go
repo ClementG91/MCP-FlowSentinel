@@ -190,6 +190,10 @@ func Fire(flows []aggregate.FlowRecord) {
 	if webhookURL == "" || !cfg.Enabled {
 		return
 	}
+	if err := config.ValidateHTTPURL(webhookURL); err != nil {
+		log.Printf("alerting: refusing invalid webhook URL: %v", err)
+		return
+	}
 
 	rl := getRateLimiter(cfg.MaxAlertsPerMinute)
 
@@ -277,6 +281,9 @@ func FireTest(flow aggregate.FlowRecord) error {
 	}
 	if webhookURL == "" {
 		return fmt.Errorf("webhook URL is not configured")
+	}
+	if err := config.ValidateHTTPURL(webhookURL); err != nil {
+		return fmt.Errorf("invalid webhook URL: %w", err)
 	}
 
 	severity := "TEST"

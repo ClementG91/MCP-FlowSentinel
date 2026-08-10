@@ -9,6 +9,7 @@ package config
 import (
 	"bytes"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -774,6 +775,30 @@ func applyEnvOverrides(cfg *Config) {
 	}
 }
 
+// ValidateHTTPURL validates an operator-configured outbound endpoint. Private
+// and loopback hosts remain allowed because local webhook receivers and private
+// threat feeds are supported intentionally; the caller is responsible for
+// deciding which destinations are trusted.
+func ValidateHTTPURL(raw string) error {
+	if len(raw) > 2048 {
+		return fmt.Errorf("URL exceeds 2048 characters")
+	}
+	u, err := url.ParseRequestURI(raw)
+	if err != nil {
+		return fmt.Errorf("invalid URL: %w", err)
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return fmt.Errorf("URL scheme must be http or https")
+	}
+	if u.Hostname() == "" {
+		return fmt.Errorf("URL must include a hostname")
+	}
+	if u.User != nil {
+		return fmt.Errorf("URL must not include embedded credentials")
+	}
+	return nil
+}
+
 // validate returns an error if any config value is semantically invalid.
 func validate(cfg *Config) error {
 	s := cfg.Scoring
@@ -849,6 +874,26 @@ func validate(cfg *Config) error {
 	}
 	if a.MaxAlertsPerMinute < 0 {
 		return fmt.Errorf("alerting.max_alerts_per_minute must be >= 0, got %d", a.MaxAlertsPerMinute)
+	}
+	if a.WebhookURL != "" {
+		if err := ValidateHTTPURL(a.WebhookURL); err != nil {
+			return fmt.Errorf("alerting.webhook_url: %w", err)
+		}
+	}
+	for _, feed := range []struct {
+		name string
+		urls []string
+	}{
+		{name: "ja3_feed.urls", urls: cfg.JA3Feed.URLs},
+		{name: "hassh_feed.urls", urls: cfg.HasshFeed.URLs},
+		{name: "ip_rep.urls", urls: cfg.IPRep.URLs},
+		{name: "dom_rep.urls", urls: cfg.DomRep.URLs},
+	} {
+		for i, raw := range feed.urls {
+			if err := ValidateHTTPURL(raw); err != nil {
+				return fmt.Errorf("%s[%d]: %w", feed.name, i, err)
+			}
+		}
 	}
 	return nil
 }

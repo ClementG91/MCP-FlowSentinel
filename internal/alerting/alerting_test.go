@@ -699,6 +699,21 @@ func TestFireTest_NoURL_ReturnsError(t *testing.T) {
 	}
 }
 
+func TestFireTest_InvalidURL_ReturnsError(t *testing.T) {
+	original := config.Get()
+	defer config.Set(original)
+
+	t.Setenv("FLOWSENTINEL_WEBHOOK_URL", "file:///tmp/not-a-webhook")
+	cfg := config.Default()
+	cfg.Alerting.WebhookURL = "https://example.com/ignored"
+	config.Set(cfg)
+
+	err := FireTest(highFlow(9.0))
+	if err == nil {
+		t.Fatal("expected an invalid webhook URL error")
+	}
+}
+
 func TestFireTest_BadStatus_ReturnsError(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
