@@ -684,6 +684,8 @@ When `alerting.enabled: true` and a `webhook_url` is set, MCP-FlowSentinel fires
 
 Compatible with **Slack incoming webhooks**, **Discord webhooks**, and any generic HTTP endpoint. Webhook bodies are HMAC-SHA256 signed when `webhook_secret` is set.
 
+Outbound webhook and threat-feed URLs must use HTTP or HTTPS, include a hostname, contain no embedded credentials, and stay within 2048 characters. Private and loopback destinations remain supported intentionally for local integrations; treat every configured endpoint as trusted operator input.
+
 **Deduplication:** the same flow will not fire more than once per deduplication window (default: 5 min).
 
 **Alert log:** every fired alert is persisted to `~/.cache/mcp-flowsentinel/alerts.jsonl`. Query it via `get_alerts`.

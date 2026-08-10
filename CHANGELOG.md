@@ -17,6 +17,7 @@ All notable changes to this project are documented in this file. The format is b
 ### Security
 
 - Hardened packet parsers, filesystem operations, remote feed handling, webhook delivery, configuration validation, and update rollback behavior.
+- Reject malformed, unsupported, credential-bearing, and oversized webhook or threat-feed URLs before any outbound request.
 
 [Unreleased]: https://github.com/ClementG91/MCP-FlowSentinel/compare/v0.1.0...HEAD
 [0.1.0]: https://github.com/ClementG91/MCP-FlowSentinel/releases/tag/v0.1.0

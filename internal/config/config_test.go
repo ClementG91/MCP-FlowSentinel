@@ -275,6 +275,58 @@ func TestValidate_DNSWorkersBounds(t *testing.T) {
 	}
 }
 
+func TestValidateHTTPURL(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		raw     string
+		wantErr bool
+	}{
+		{name: "https", raw: "https://feeds.example.com/list.txt"},
+		{name: "http loopback", raw: "http://127.0.0.1:9200/hook"},
+		{name: "missing host", raw: "https:///feed", wantErr: true},
+		{name: "unsupported scheme", raw: "file:///tmp/feed", wantErr: true},
+		{name: "embedded credentials", raw: "https://user:secret@example.com/feed", wantErr: true},
+		{name: "malformed", raw: "://not-a-url", wantErr: true},
+		{name: "too long", raw: "https://example.com/" + strings.Repeat("a", 2049), wantErr: true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			err := ValidateHTTPURL(tc.raw)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("ValidateHTTPURL(%q) error = %v, wantErr %v", tc.raw, err, tc.wantErr)
+			}
+		})
+	}
+}
+
+func TestLoad_RejectsInvalidOutboundURLs(t *testing.T) {
+	tests := []struct {
+		name string
+		yaml string
+	}{
+		{name: "webhook", yaml: "alerting:\n  webhook_url: file:///tmp/hook\n"},
+		{name: "JA3 feed", yaml: "ja3_feed:\n  urls: [ftp://example.com/feed]\n"},
+		{name: "HASSH feed", yaml: "hassh_feed:\n  urls: [https:///feed]\n"},
+		{name: "IP reputation", yaml: "ip_rep:\n  urls: [https://user:secret@example.com/feed]\n"},
+		{name: "domain reputation", yaml: "dom_rep:\n  urls: [file:///tmp/feed]\n"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			original := Get()
+			defer Set(original)
+
+			if _, err := Load(writeConfigYAML(t, tc.yaml)); err == nil {
+				t.Fatal("Load should reject an invalid outbound URL")
+			}
+		})
+	}
+}
+
 func TestLoad_InvalidYAML_ReturnsError(t *testing.T) {
 	original := Get()
 	defer Set(original)
