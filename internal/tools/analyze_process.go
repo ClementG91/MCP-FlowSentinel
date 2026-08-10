@@ -10,32 +10,35 @@ import (
 
 	"github.com/ClementG91/MCP-FlowSentinel/internal/history"
 	"github.com/ClementG91/MCP-FlowSentinel/internal/intel"
-	"github.com/mark3labs/mcp-go/mcp"
-	"github.com/mark3labs/mcp-go/server"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 	psnet "github.com/shirou/gopsutil/v3/net"
 	"github.com/shirou/gopsutil/v3/process"
 )
 
-func registerAnalyzeProcess(s *server.MCPServer) {
-	tool := mcp.NewTool("analyze_process",
-		mcp.WithDescription(
+func registerAnalyzeProcess(s *mcp.Server) {
+	tool := newTool("analyze_process",
+		withDescription(
 			"Deep-dive analysis of a specific process's network activity. "+
 				"Shows current open connections with GeoIP enrichment, full process metadata "+
 				"(binary path, cmdline, parent chain), and a count of matching flows in the "+
 				"24-hour history. "+
 				"Provide either pid or process_name (or both).",
 		),
-		mcp.WithNumber("pid",
-			mcp.Description("Exact PID to analyze. Takes precedence over process_name."),
+		withBehavior("Analyze a process", true, true, false),
+		withInteger("pid",
+			minimum(1),
+			maximum(2147483647),
+			description("Exact PID to analyze. Takes precedence over process_name."),
 		),
-		mcp.WithString("process_name",
-			mcp.Description(
+		withString("process_name",
+			maxLength(256),
+			description(
 				"Case-insensitive substring match against running process names. "+
 					"Returns all matching processes when pid is not specified.",
 			),
 		),
 	)
-	s.AddTool(tool, analyzeProcessHandler)
+	addTool(s, tool, analyzeProcessHandler)
 }
 
 // processReport is the per-process output structure.
@@ -67,9 +70,7 @@ type enrichedConn struct {
 	GeoHighRisk bool   `json:"geo_high_risk,omitempty"`
 }
 
-func analyzeProcessHandler(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	args := req.GetArguments()
-
+func analyzeProcessHandler(_ context.Context, args map[string]any) (*mcp.CallToolResult, error) {
 	var targetPID int32
 	if v, ok := args["pid"].(float64); ok && v > 0 {
 		targetPID = int32(v)
@@ -139,7 +140,7 @@ func analyzeProcessHandler(_ context.Context, req mcp.CallToolRequest) (*mcp.Cal
 	if err != nil {
 		return errorResult("failed to encode response: " + err.Error()), nil
 	}
-	return mcp.NewToolResultText(string(out)), nil
+	return textResult(string(out)), nil
 }
 
 func buildProcessReport(p *process.Process, conns []psnet.ConnectionStat) processReport {

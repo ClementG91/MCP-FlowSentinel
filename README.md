@@ -4,7 +4,7 @@
 
 MCP-FlowSentinel is a [Model Context Protocol](https://modelcontextprotocol.io/) server that gives **any MCP-compatible AI assistant** real-time visibility into your network traffic. It captures packets, maps every connection to the owning process, and runs 30+ detection signals — so you can ask your AI to investigate, explain, or alert on network activity in plain English.
 
-Works with **Claude Desktop, Cursor, Cline, Continue.dev, Zed, Windsurf**, and any other client that supports the MCP stdio transport.
+Works with **Codex, ChatGPT desktop, Claude Desktop, Cursor, Cline, Continue.dev, Zed, Windsurf**, and any other client that supports the MCP stdio transport.
 
 > **Security status:** packet parsers and scoring paths are covered by unit, race,
 > fuzz-seed, static-analysis, and vulnerability checks. The project has not yet
@@ -14,6 +14,7 @@ Works with **Claude Desktop, Cursor, Cline, Continue.dev, Zed, Windsurf**, and a
 [![CI](https://github.com/ClementG91/MCP-FlowSentinel/actions/workflows/ci.yml/badge.svg)](https://github.com/ClementG91/MCP-FlowSentinel/actions/workflows/ci.yml)
 [![Go Report Card](https://goreportcard.com/badge/github.com/ClementG91/MCP-FlowSentinel)](https://goreportcard.com/report/github.com/ClementG91/MCP-FlowSentinel)
 [![Go version](https://img.shields.io/github/go-mod/go-version/ClementG91/MCP-FlowSentinel?logo=go)](go.mod)
+[![MCP 2026-07-28](https://img.shields.io/badge/MCP-2026--07--28-6f42c1)](https://modelcontextprotocol.io/specification/2026-07-28)
 [![Release](https://img.shields.io/github/v/release/ClementG91/MCP-FlowSentinel?sort=semver)](https://github.com/ClementG91/MCP-FlowSentinel/releases)
 [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/ClementG91/MCP-FlowSentinel/badge)](https://scorecard.dev/viewer/?uri=github.com/ClementG91/MCP-FlowSentinel)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
@@ -24,8 +25,22 @@ Works with **Claude Desktop, Cursor, Cline, Continue.dev, Zed, Windsurf**, and a
 - **Local-first:** packet inspection and behavioral scoring run on your machine; encrypted payloads are never decrypted.
 - **Process-aware:** flows are correlated with the executable and process that owns each socket.
 - **Explainable detection:** 30+ bounded signals expose their reasons and mapped MITRE ATT&CK techniques instead of returning an opaque verdict.
-- **MCP-native:** one stdio server works with any standards-compatible MCP client on Windows, Linux, and macOS.
+- **MCP-native:** the official Go SDK supports MCP `2026-07-28`, negotiates older revisions, and returns native structured tool results.
 - **Defense in depth:** race tests, static analysis, vulnerability scanning, pinned CI actions, release checksums, SBOMs, and build provenance protect the delivery chain.
+
+## MCP protocol compatibility
+
+FlowSentinel uses the official `modelcontextprotocol/go-sdk` and supports the
+MCP `2026-07-28` specification over STDIO. This includes `server/discover`,
+per-request protocol metadata, deterministic tool discovery, JSON Schema
+2020-12 input validation, server instructions, and tool behavior annotations.
+The SDK also negotiates `2025-11-25`, `2025-06-18`, `2025-03-26`, and
+`2024-11-05` with older clients.
+
+FlowSentinel does not expose a remote Streamable HTTP endpoint, so the new HTTP
+routing headers and OAuth requirements are intentionally outside its attack
+surface. It does not use the deprecated roots, sampling, or protocol logging
+features.
 
 ---
 
@@ -113,9 +128,44 @@ if replacement fails.
 
 ## Client configuration
 
-MCP-FlowSentinel uses the **stdio transport** — the binary is launched as a subprocess by your AI client. The configuration format is the same across clients; only the config file location differs.
+MCP-FlowSentinel uses the **stdio transport** — the binary is launched as a subprocess by your AI client. Each client uses its own configuration syntax.
 
 > **Windows note:** the binary must run as Administrator for packet capture. See your client's docs for how to launch MCP servers with elevated privileges, or pre-elevate the terminal that starts your client.
+
+### Codex and ChatGPT desktop
+
+Codex CLI, the Codex IDE extension, and ChatGPT desktop share the MCP
+configuration stored in `~/.codex/config.toml`. After installing FlowSentinel,
+the shortest setup is:
+
+```bash
+codex mcp add flowsentinel -- mcp-flowsentinel
+codex mcp list
+```
+
+Alternatively, merge the following into `~/.codex/config.toml` or a trusted
+project's `.codex/config.toml`:
+
+```toml
+[mcp_servers.flowsentinel]
+command = "mcp-flowsentinel"
+enabled = true
+startup_timeout_sec = 15
+tool_timeout_sec = 90
+default_tools_approval_mode = "writes"
+```
+
+The `writes` approval mode uses FlowSentinel's MCP tool annotations: read-only
+inspection tools can run normally, while live captures, PCAP analysis, history
+writes, and configuration reloads request approval. Use `/mcp` in Codex or
+ChatGPT desktop to verify the connection. If the binary is not on `PATH`, set
+`command` to its absolute path. A ready-to-copy file is provided in
+[`codex_config_snippet.toml`](codex_config_snippet.toml).
+
+See the [official OpenAI MCP documentation](https://developers.openai.com/codex/mcp)
+for the CLI, desktop, IDE, and advanced tool-policy options.
+
+---
 
 ### Claude Desktop
 

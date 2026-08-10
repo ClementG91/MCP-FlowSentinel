@@ -1,0 +1,7 @@
+# Add this table to ~/.codex/config.toml or to .codex/config.toml in a trusted project.
+[mcp_servers.flowsentinel]
+command = "mcp-flowsentinel"
+enabled = true
+startup_timeout_sec = 15
+tool_timeout_sec = 90
+default_tools_approval_mode = "writes"

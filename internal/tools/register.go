@@ -1,10 +1,10 @@
 // Package tools wires together the MCP tool definitions and their handlers.
 package tools
 
-import "github.com/mark3labs/mcp-go/server"
+import "github.com/modelcontextprotocol/go-sdk/mcp"
 
 // Register adds all FlowSentinel tools to the MCP server.
-func Register(s *server.MCPServer) {
+func Register(s *mcp.Server) {
 	registerListInterfaces(s)
 	registerAnalyzeNetwork(s)
 	registerAnalyzePcap(s)

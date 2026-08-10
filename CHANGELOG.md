@@ -4,9 +4,28 @@ All notable changes to this project are documented in this file. The format is b
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-08-10
+
+### Added
+
+- Codex, ChatGPT desktop, CLI, and IDE configuration with approval behavior driven by MCP tool annotations.
+- MCP structured tool results, server instructions, human-readable tool titles, and explicit read-only, idempotent, open-world, and destructive-behavior hints.
+- An end-to-end protocol test covering MCP `2026-07-28` negotiation, tool discovery, JSON Schema dialect, annotations, and invalid-input rejection.
+
+### Changed
+
+- Migrated from the third-party `mark3labs/mcp-go` package to the official `modelcontextprotocol/go-sdk` v1.7.0.
+- Upgraded protocol support from MCP `2025-11-25` to `2026-07-28` while retaining automatic negotiation with older clients.
+- Tool arguments now use JSON Schema 2020-12 with `additionalProperties: false` and server-side validation before handler execution.
+
+### Security
+
+- Reject non-IP `live_watch.target_ip` values before constructing the BPF filter, preventing filter-expression injection through that parameter.
+
 ### Documentation
 
 - Updated the supported-version policy and added a direct private vulnerability-reporting link.
+- Documented the July 2026 MCP changes, STDIO security boundary, backward compatibility, and Codex setup.
 
 ## [0.1.0] - 2026-08-10
 
@@ -23,5 +42,6 @@ All notable changes to this project are documented in this file. The format is b
 - Hardened packet parsers, filesystem operations, remote feed handling, webhook delivery, configuration validation, and update rollback behavior.
 - Reject malformed, unsupported, credential-bearing, and oversized webhook or threat-feed URLs before any outbound request.
 
-[Unreleased]: https://github.com/ClementG91/MCP-FlowSentinel/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/ClementG91/MCP-FlowSentinel/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/ClementG91/MCP-FlowSentinel/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/ClementG91/MCP-FlowSentinel/releases/tag/v0.1.0

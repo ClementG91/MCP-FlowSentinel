@@ -6,56 +6,66 @@ import (
 	"time"
 
 	"github.com/ClementG91/MCP-FlowSentinel/internal/history"
-	"github.com/mark3labs/mcp-go/mcp"
-	"github.com/mark3labs/mcp-go/server"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
-func registerGetFlowHistory(s *server.MCPServer) {
-	tool := mcp.NewTool("get_flow_history",
-		mcp.WithDescription(
+func registerGetFlowHistory(s *mcp.Server) {
+	tool := newTool("get_flow_history",
+		withDescription(
 			"Query the rolling 24-hour history of previously analyzed network flows. "+
 				"Returns flows from past analyze_network and analyze_pcap sessions, "+
 				"allowing you to correlate activity over time, track recurring connections, "+
 				"or investigate processes that were active earlier. "+
 				"History is stored locally at ~/.cache/mcp-flowsentinel/history.jsonl.",
 		),
-		mcp.WithNumber("max_age_hours",
-			mcp.Description(
+		withBehavior("Get network flow history", true, true, false),
+		withNumber("max_age_hours",
+			minimum(0.01),
+			maximum(8760),
+			defaultValue(24),
+			description(
 				"How far back to look, in hours. Default: 24 (full rolling window). "+
 					"Use 1 to see only the last hour.",
 			),
 		),
-		mcp.WithNumber("min_score",
-			mcp.Description(
+		withNumber("min_score",
+			minimum(0),
+			maximum(10),
+			defaultValue(0),
+			description(
 				"Only return flows with suspicion_score >= this value (0–10). "+
 					"Default: 0 (all flows). Use 5 to show HIGH+ only.",
 			),
 		),
-		mcp.WithString("src_ip",
-			mcp.Description("Filter by exact source IP address. Empty means any."),
+		withString("src_ip",
+			maxLength(45),
+			description("Filter by exact source IP address. Empty means any."),
 		),
-		mcp.WithString("dst_ip",
-			mcp.Description("Filter by exact destination IP address. Empty means any."),
+		withString("dst_ip",
+			maxLength(45),
+			description("Filter by exact destination IP address. Empty means any."),
 		),
-		mcp.WithString("process_name",
-			mcp.Description(
+		withString("process_name",
+			maxLength(256),
+			description(
 				"Case-insensitive substring filter on process name. "+
 					"E.g. 'curl' matches 'curl', 'curl.exe', 'libcurl'.",
 			),
 		),
-		mcp.WithNumber("top_n",
-			mcp.Description(
+		withInteger("top_n",
+			minimum(0),
+			maximum(10000),
+			defaultValue(0),
+			description(
 				"Return at most this many flows per history entry (highest score first). "+
 					"Default: 0 (unlimited).",
 			),
 		),
 	)
-	s.AddTool(tool, getFlowHistoryHandler)
+	addTool(s, tool, getFlowHistoryHandler)
 }
 
-func getFlowHistoryHandler(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	args := req.GetArguments()
-
+func getFlowHistoryHandler(_ context.Context, args map[string]any) (*mcp.CallToolResult, error) {
 	opts := history.QueryOpts{}
 
 	if v, ok := args["max_age_hours"].(float64); ok && v > 0 {
@@ -123,5 +133,5 @@ func getFlowHistoryHandler(_ context.Context, req mcp.CallToolRequest) (*mcp.Cal
 	if err != nil {
 		return errorResult("failed to encode response: " + err.Error()), nil
 	}
-	return mcp.NewToolResultText(string(out)), nil
+	return textResult(string(out)), nil
 }

@@ -1,5 +1,5 @@
 // MCP-FlowSentinel — correlates live network traffic with local processes.
-// Transport: stdio (compatible with Claude Desktop and any MCP client).
+// Transport: stdio (compatible with Codex and any MCP client).
 package main
 
 import (
@@ -21,11 +21,25 @@ import (
 	"github.com/ClementG91/MCP-FlowSentinel/internal/intel"
 	"github.com/ClementG91/MCP-FlowSentinel/internal/tools"
 	"github.com/ClementG91/MCP-FlowSentinel/internal/updater"
-	"github.com/mark3labs/mcp-go/server"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
 // version is injected at build time via -ldflags "-X main.version=<tag>".
 var version = "dev"
+
+const serverInstructions = "MCP-FlowSentinel provides local, process-aware network security telemetry. Start with list_interfaces, then use analyze_network for a bounded live capture or analyze_pcap for offline evidence. Live capture requires root/Administrator privileges. Read-only tools may be called directly; analyze_network, analyze_pcap, live_watch, and reload_config modify local runtime state or history. Treat detection scores as investigation signals, not proof of compromise."
+
+func newMCPServer() *mcp.Server {
+	server := mcp.NewServer(&mcp.Implementation{
+		Name:        "mcp-flowsentinel",
+		Title:       "MCP-FlowSentinel",
+		Description: "Local-first, process-aware network visibility and behavioral threat detection.",
+		Version:     version,
+		WebsiteURL:  "https://github.com/ClementG91/MCP-FlowSentinel",
+	}, &mcp.ServerOptions{Instructions: serverInstructions})
+	tools.Register(server)
+	return server
+}
 
 func main() {
 	// Use stderr exclusively; stdout is reserved for the MCP JSON-RPC stream.
@@ -110,15 +124,14 @@ func main() {
 
 	intel.Init() // load GeoIP databases (paths come from config or env vars)
 
-	s := server.NewMCPServer("MCP-FlowSentinel", version)
-	tools.Register(s)
+	s := newMCPServer()
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
 	log.Printf("MCP-FlowSentinel %s — stdio transport ready", version)
 
-	if err := server.NewStdioServer(s).Listen(ctx, os.Stdin, os.Stdout); err != nil {
+	if err := s.Run(ctx, &mcp.StdioTransport{}); err != nil {
 		log.Fatalf("fatal: %v", err)
 	}
 }
@@ -146,8 +159,7 @@ func printUsage(w io.Writer) {
 func runDaemon() {
 	intel.Init()
 
-	s := server.NewMCPServer("MCP-FlowSentinel", version)
-	tools.Register(s)
+	s := newMCPServer()
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
@@ -161,7 +173,7 @@ func runDaemon() {
 
 	log.Printf("MCP-FlowSentinel %s — daemon mode + stdio transport ready", version)
 
-	if err := server.NewStdioServer(s).Listen(ctx, os.Stdin, os.Stdout); err != nil {
+	if err := s.Run(ctx, &mcp.StdioTransport{}); err != nil {
 		log.Fatalf("fatal: %v", err)
 	}
 }

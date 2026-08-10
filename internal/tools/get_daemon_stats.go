@@ -5,13 +5,12 @@ import (
 	"encoding/json"
 
 	"github.com/ClementG91/MCP-FlowSentinel/internal/daemon"
-	"github.com/mark3labs/mcp-go/mcp"
-	"github.com/mark3labs/mcp-go/server"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
-func registerGetDaemonStats(s *server.MCPServer) {
-	s.AddTool(mcp.NewTool("get_daemon_stats",
-		mcp.WithDescription(`Return runtime statistics for the background daemon.
+func registerGetDaemonStats(s *mcp.Server) {
+	addTool(s, newTool("get_daemon_stats",
+		withDescription(`Return runtime statistics for the background daemon.
 
 Reports whether the daemon is currently running, and if so:
   - start_time / uptime_seconds — how long it has been running
@@ -24,14 +23,15 @@ Reports whether the daemon is currently running, and if so:
 
 If the daemon is not running (MCP server started without --daemon), all
 counters are zero and running is false.`),
+		withBehavior("Get daemon statistics", true, true, false),
 	), getDaemonStatsHandler)
 }
 
-func getDaemonStatsHandler(_ context.Context, _ mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func getDaemonStatsHandler(_ context.Context, _ map[string]any) (*mcp.CallToolResult, error) {
 	stats := daemon.GetStats()
 	data, err := json.MarshalIndent(stats, "", "  ")
 	if err != nil {
 		return errorResult(err.Error()), nil
 	}
-	return mcp.NewToolResultText(string(data)), nil
+	return textResult(string(data)), nil
 }

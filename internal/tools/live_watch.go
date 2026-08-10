@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"net"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -14,13 +15,12 @@ import (
 	"github.com/ClementG91/MCP-FlowSentinel/internal/config"
 	"github.com/ClementG91/MCP-FlowSentinel/internal/correlate"
 	"github.com/ClementG91/MCP-FlowSentinel/internal/history"
-	"github.com/mark3labs/mcp-go/mcp"
-	"github.com/mark3labs/mcp-go/server"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
-func registerLiveWatch(s *server.MCPServer) {
-	tool := mcp.NewTool("live_watch",
-		mcp.WithDescription(
+func registerLiveWatch(s *mcp.Server) {
+	tool := newTool("live_watch",
+		withDescription(
 			"Watch a specific process and/or IP address in real time for up to 60 seconds. "+
 				"Captures live traffic, scores each flow, and returns the result filtered to the "+
 				"target. Useful for investigating 'is chrome.exe calling home?' or "+
@@ -29,38 +29,47 @@ func registerLiveWatch(s *server.MCPServer) {
 				"(use list_interfaces to find one). "+
 				"At least one of process_name or target_ip must be provided.",
 		),
-		mcp.WithString("interface",
-			mcp.Required(),
-			mcp.Description("Network interface to capture on (e.g. eth0, en0)."),
+		withBehavior("Watch live network activity", false, false, true),
+		withString("interface",
+			required(),
+			minLength(1),
+			maxLength(256),
+			description("Network interface to capture on (e.g. eth0, en0)."),
 		),
-		mcp.WithString("process_name",
-			mcp.Description(
+		withString("process_name",
+			maxLength(256),
+			description(
 				"Case-insensitive substring match against process names. "+
 					"Only flows whose owning process name contains this string are returned.",
 			),
 		),
-		mcp.WithString("target_ip",
-			mcp.Description(
+		withString("target_ip",
+			maxLength(45),
+			description(
 				"Only return flows involving this IP address as source or destination.",
 			),
 		),
-		mcp.WithNumber("duration_seconds",
-			mcp.Description(
+		withNumber("duration_seconds",
+			minimum(1),
+			maximum(60),
+			defaultValue(10),
+			description(
 				"How long to capture (1–60 seconds). Default: 10.",
 			),
 		),
-		mcp.WithNumber("min_score",
-			mcp.Description(
+		withNumber("min_score",
+			minimum(0),
+			maximum(10),
+			defaultValue(0),
+			description(
 				"Only return flows with suspicion_score >= this value (0–10). Default: 0.",
 			),
 		),
 	)
-	s.AddTool(tool, liveWatchHandler)
+	addTool(s, tool, liveWatchHandler)
 }
 
-func liveWatchHandler(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	args := req.GetArguments()
-
+func liveWatchHandler(ctx context.Context, args map[string]any) (*mcp.CallToolResult, error) {
 	ifaceName, _ := args["interface"].(string)
 	if ifaceName == "" {
 		return errorResult("'interface' parameter is required"), nil
@@ -71,6 +80,9 @@ func liveWatchHandler(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallTo
 
 	processFilter, _ := args["process_name"].(string)
 	targetIP, _ := args["target_ip"].(string)
+	if targetIP != "" && net.ParseIP(targetIP) == nil {
+		return errorResult("'target_ip' must be a valid IPv4 or IPv6 address"), nil
+	}
 
 	if processFilter == "" && targetIP == "" {
 		return errorResult("provide at least one of 'process_name' or 'target_ip'"), nil
@@ -212,5 +224,5 @@ func liveWatchHandler(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallTo
 	if err != nil {
 		return errorResult("failed to encode response: " + err.Error()), nil
 	}
-	return mcp.NewToolResultText(string(out)), nil
+	return textResult(string(out)), nil
 }
