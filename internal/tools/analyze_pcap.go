@@ -54,7 +54,7 @@ func registerAnalyzePcap(s *server.MCPServer) {
 }
 
 func analyzePcapHandler(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	args := req.Params.Arguments
+	args := req.GetArguments()
 
 	filePath, _ := args["file_path"].(string)
 	if filePath == "" {

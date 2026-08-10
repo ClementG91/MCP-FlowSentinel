@@ -45,14 +45,15 @@ func getAlertsHandler(_ context.Context, req mcp.CallToolRequest) (*mcp.CallTool
 		MaxAgeHours: 24,
 		TopN:        50,
 	}
+	args := req.GetArguments()
 
-	if v, ok := req.Params.Arguments["max_age_hours"].(float64); ok && v > 0 {
+	if v, ok := args["max_age_hours"].(float64); ok && v > 0 {
 		opts.MaxAgeHours = int(v)
 	}
-	if v, ok := req.Params.Arguments["min_score"].(float64); ok && v > 0 {
+	if v, ok := args["min_score"].(float64); ok && v > 0 {
 		opts.MinScore = v
 	}
-	if v, ok := req.Params.Arguments["top_n"].(float64); ok && v > 0 {
+	if v, ok := args["top_n"].(float64); ok && v > 0 {
 		opts.TopN = int(v)
 	}
 
