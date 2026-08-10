@@ -6,15 +6,19 @@ or professional incident-response tooling.
 
 ## Supported versions
 
-The project is currently pre-release. Security fixes are applied to the latest
-commit on `main`. A version support table will be added with the first stable
-release.
+Security fixes are applied to the latest `0.1.x` release and the latest commit
+on `main`.
+
+| Version | Supported |
+|---------|-----------|
+| `0.1.x` | Yes |
+| `< 0.1.0` | No |
 
 ## Reporting a vulnerability
 
-Do not open a public issue for a suspected vulnerability. Use GitHub's
-**Report a vulnerability** action in the repository Security tab so the report,
-proof of concept, logs, and affected versions remain private.
+Do not open a public issue for a suspected vulnerability. Use
+[GitHub private vulnerability reporting](https://github.com/ClementG91/MCP-FlowSentinel/security/advisories/new)
+so the report, proof of concept, logs, and affected versions remain private.
 
 Please include:
 

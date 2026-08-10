@@ -4,6 +4,10 @@ All notable changes to this project are documented in this file. The format is b
 
 ## [Unreleased]
 
+### Documentation
+
+- Updated the supported-version policy and added a direct private vulnerability-reporting link.
+
 ## [0.1.0] - 2026-08-10
 
 ### Added
