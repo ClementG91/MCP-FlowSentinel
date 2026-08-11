@@ -12,7 +12,6 @@ Works with **Codex, ChatGPT desktop, Claude Desktop, Cursor, Cline, Continue.dev
 > replace—an EDR, firewall, IDS, or professional incident-response workflow.
 
 [![CI](https://github.com/ClementG91/MCP-FlowSentinel/actions/workflows/ci.yml/badge.svg)](https://github.com/ClementG91/MCP-FlowSentinel/actions/workflows/ci.yml)
-[![Go Report Card](https://goreportcard.com/badge/github.com/ClementG91/MCP-FlowSentinel)](https://goreportcard.com/report/github.com/ClementG91/MCP-FlowSentinel)
 [![Go version](https://img.shields.io/github/go-mod/go-version/ClementG91/MCP-FlowSentinel?logo=go)](go.mod)
 [![MCP 2026-07-28](https://img.shields.io/badge/MCP-2026--07--28-6f42c1)](https://modelcontextprotocol.io/specification/2026-07-28)
 [![Release](https://img.shields.io/github/v/release/ClementG91/MCP-FlowSentinel?sort=semver)](https://github.com/ClementG91/MCP-FlowSentinel/releases)
@@ -159,34 +158,29 @@ ChatGPT desktop to verify the connection. If the binary is not on `PATH`, set
 See the [official OpenAI MCP documentation](https://developers.openai.com/codex/mcp)
 for the CLI, desktop, IDE, and advanced tool-policy options.
 
-### Claude Desktop, Cursor, Cline, and Windsurf
+### Shared JSON clients
 
-These clients share the same `mcpServers` JSON shape. Merge the single block
-below into the location for your client; do not overwrite unrelated servers.
+Claude Desktop, Cursor, Cline project configurations, and Windsurf use the same
+`mcpServers` object. Merge this block without overwriting unrelated servers:
 
-| Client | Configuration location | Apply the change |
-|--------|------------------------|------------------|
-| Claude Desktop | Windows: `%APPDATA%\Claude\claude_desktop_config.json`<br>macOS: `~/Library/Application Support/Claude/claude_desktop_config.json`<br>Linux: `~/.config/Claude/claude_desktop_config.json` | Restart Claude Desktop |
-| Cursor | Global: `~/.cursor/mcp.json`<br>Project: `.cursor/mcp.json` | Reload the editor window |
-| Cline | IDE: **MCP Servers → Configure MCP Servers**<br>Project: `.cline/mcp.json` | Save the configuration; CLI users can run `cline mcp` |
-| Windsurf | `~/.codeium/windsurf/mcp_config.json` | Reload the editor window |
+| Client | Where to configure |
+|--------|--------------------|
+| Claude Desktop | Windows: `%APPDATA%\Claude\claude_desktop_config.json`<br>macOS: `~/Library/Application Support/Claude/claude_desktop_config.json`<br>Linux: `~/.config/Claude/claude_desktop_config.json` |
+| Cursor | Global: `~/.cursor/mcp.json`<br>Project: `.cursor/mcp.json` |
+| Cline | IDE: **MCP Servers → Configure MCP Servers**<br>Project: `.cline/mcp.json`<br>CLI: `cline mcp` |
+| Windsurf | `~/.codeium/windsurf/mcp_config.json` |
 
 ```json
 {
   "mcpServers": {
     "flowsentinel": {
-      "command": "/absolute/path/to/mcp-flowsentinel",
-      "args": []
+      "command": "/absolute/path/to/mcp-flowsentinel"
     }
   }
 }
 ```
 
-For Cline CLI, open the interactive MCP manager with:
-
-```bash
-cline mcp
-```
+Save the file, then restart or reload the client.
 
 ### Continue.dev
 
@@ -200,24 +194,13 @@ schema: v1
 mcpServers:
   - name: flowsentinel
     command: /absolute/path/to/mcp-flowsentinel
-    args: []
 ```
 
 ### Zed
 
-Open **Settings → AI → MCP Servers → Add Local Server**, or merge this into
-Zed's `settings.json`:
-
-```json
-{
-  "context_servers": {
-    "flowsentinel": {
-      "command": "/absolute/path/to/mcp-flowsentinel",
-      "args": []
-    }
-  }
-}
-```
+Open **Settings → AI → MCP Servers → Add Local Server**, name it
+`flowsentinel`, and select the absolute path to the binary as its command. Zed
+writes the corresponding `context_servers` entry to `settings.json`.
 
 ---
 

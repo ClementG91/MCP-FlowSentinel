@@ -6,8 +6,9 @@ All notable changes to this project are documented in this file. The format is b
 
 ### Documentation
 
-- Consolidated identical client and Unix installation examples into canonical blocks, and corrected the Cline CLI guidance.
+- Consolidated identical client and Unix installation examples into canonical blocks, removed redundant empty arguments, and corrected the Cline CLI guidance.
 - Removed the redundant standalone Codex configuration snippet; the canonical TOML example remains in the README.
+- Removed the retired Go Report Card badge after the upstream service shut down.
 
 ## [0.2.0] - 2026-08-10
 
