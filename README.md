@@ -82,21 +82,16 @@ irm https://raw.githubusercontent.com/ClementG91/MCP-FlowSentinel/main/install.p
 >
 > The MCP server process must run with **Administrator** privileges for packet capture to work.
 
-#### Linux
+#### Linux and macOS
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/ClementG91/MCP-FlowSentinel/main/install.sh | bash
 ```
 
-The script auto-installs `libpcap` via your package manager and grants `cap_net_raw` so you don't need to run as root.
-
-#### macOS
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/ClementG91/MCP-FlowSentinel/main/install.sh | bash
-```
-
-Requires [Homebrew](https://brew.sh). The script installs `libpcap` automatically.
+- **Linux:** the script installs `libpcap` through the detected package manager
+  and grants `cap_net_raw`, so routine capture does not require root.
+- **macOS:** [Homebrew](https://brew.sh) is required; the script installs
+  `libpcap` automatically.
 
 #### Manual download
 
@@ -159,39 +154,22 @@ The `writes` approval mode uses FlowSentinel's MCP tool annotations: read-only
 inspection tools can run normally, while live captures, PCAP analysis, history
 writes, and configuration reloads request approval. Use `/mcp` in Codex or
 ChatGPT desktop to verify the connection. If the binary is not on `PATH`, set
-`command` to its absolute path. A ready-to-copy file is provided in
-[`codex_config_snippet.toml`](codex_config_snippet.toml).
+`command` to its absolute path.
 
 See the [official OpenAI MCP documentation](https://developers.openai.com/codex/mcp)
 for the CLI, desktop, IDE, and advanced tool-policy options.
 
----
+### Claude Desktop, Cursor, Cline, and Windsurf
 
-### Claude Desktop
+These clients share the same `mcpServers` JSON shape. Merge the single block
+below into the location for your client; do not overwrite unrelated servers.
 
-**Config file:**
-- Windows: `%APPDATA%\Claude\claude_desktop_config.json`
-- macOS: `~/Library/Application Support/Claude/claude_desktop_config.json`
-- Linux: `~/.config/Claude/claude_desktop_config.json`
-
-```json
-{
-  "mcpServers": {
-    "flowsentinel": {
-      "command": "/absolute/path/to/mcp-flowsentinel",
-      "args": []
-    }
-  }
-}
-```
-
-Restart Claude Desktop after editing.
-
----
-
-### Cursor
-
-**Config file:** `~/.cursor/mcp.json` (global) or `.cursor/mcp.json` (per-project)
+| Client | Configuration location | Apply the change |
+|--------|------------------------|------------------|
+| Claude Desktop | Windows: `%APPDATA%\Claude\claude_desktop_config.json`<br>macOS: `~/Library/Application Support/Claude/claude_desktop_config.json`<br>Linux: `~/.config/Claude/claude_desktop_config.json` | Restart Claude Desktop |
+| Cursor | Global: `~/.cursor/mcp.json`<br>Project: `.cursor/mcp.json` | Reload the editor window |
+| Cline | IDE: **MCP Servers → Configure MCP Servers**<br>Project: `.cline/mcp.json` | Save the configuration; CLI users can run `cline mcp` |
+| Windsurf | `~/.codeium/windsurf/mcp_config.json` | Reload the editor window |
 
 ```json
 {
@@ -204,32 +182,11 @@ Restart Claude Desktop after editing.
 }
 ```
 
-Reload the window (`Ctrl+Shift+P` → *Developer: Reload Window*) after editing.
-
----
-
-### Cline (VS Code)
-
-Open the Cline panel, choose **MCP Servers → Configure MCP Servers**, and merge:
-
-```json
-{
-  "mcpServers": {
-    "flowsentinel": {
-      "command": "/absolute/path/to/mcp-flowsentinel",
-      "args": []
-    }
-  }
-}
-```
-
-For Cline CLI, the equivalent interactive command is:
+For Cline CLI, open the interactive MCP manager with:
 
 ```bash
-cline mcp install flowsentinel -- /absolute/path/to/mcp-flowsentinel
+cline mcp
 ```
-
----
 
 ### Continue.dev
 
@@ -246,32 +203,14 @@ mcpServers:
     args: []
 ```
 
----
-
 ### Zed
 
-**Config file:** `~/.config/zed/settings.json`
+Open **Settings → AI → MCP Servers → Add Local Server**, or merge this into
+Zed's `settings.json`:
 
 ```json
 {
   "context_servers": {
-    "flowsentinel": {
-      "command": "/absolute/path/to/mcp-flowsentinel",
-      "args": []
-    }
-  }
-}
-```
-
----
-
-### Windsurf (Codeium)
-
-**Config file:** `~/.codeium/windsurf/mcp_config.json`
-
-```json
-{
-  "mcpServers": {
     "flowsentinel": {
       "command": "/absolute/path/to/mcp-flowsentinel",
       "args": []

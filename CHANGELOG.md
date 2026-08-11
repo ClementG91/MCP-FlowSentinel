@@ -4,6 +4,11 @@ All notable changes to this project are documented in this file. The format is b
 
 ## [Unreleased]
 
+### Documentation
+
+- Consolidated identical client and Unix installation examples into canonical blocks, and corrected the Cline CLI guidance.
+- Removed the redundant standalone Codex configuration snippet; the canonical TOML example remains in the README.
+
 ## [0.2.0] - 2026-08-10
 
 ### Added
