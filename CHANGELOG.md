@@ -4,10 +4,11 @@ All notable changes to this project are documented in this file. The format is b
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-09-21
+
 ### Security
 
-- Moved to Go 1.26.8: Go 1.25 is out of upstream support since the Go 1.27 release. This also allows `golang.org/x/crypto` v0.56.0, which fixes GO-2026-6354 and GO-2026-6355.
-- Raised the minimum Go toolchain to 1.25.13 to pick up standard-library fixes for GO-2026-6218 (`net/url`), GO-2026-6090 (`crypto/tls`), GO-2026-6089 and GO-2026-5026 (`net/http`), and GO-2026-5972 (`encoding/asn1`).
+- Built with Go 1.26.8 instead of 1.25.12: Go 1.25 no longer receives security fixes, and the move picks up standard-library fixes for GO-2026-6218 (`net/url`), GO-2026-6090 (`crypto/tls`), GO-2026-6089 and GO-2026-5026 (`net/http`), and GO-2026-5972 (`encoding/asn1`). `golang.org/x/crypto` v0.56.0 fixes GO-2026-6354 and GO-2026-6355.
 - `--update` now verifies release authenticity, not just integrity: it requires the `attestation.sigstore.json` Sigstore bundle, checks it against the Sigstore public-good trust root, and only accepts SLSA provenance signed by this repository's `release.yml` for the exact release tag that lists the binary's SHA-256. Releases without a valid attestation are refused.
 - Releases now publish their provenance bundle as the `attestation.sigstore.json` asset.
 - Each capture window or PCAP analysis now tracks at most 250,000 distinct flows. Packets that would open a flow beyond that are dropped and logged once, so a port scan or spoofed-source flood cannot exhaust memory. Packets for flows already tracked are still counted.
@@ -75,6 +76,7 @@ All notable changes to this project are documented in this file. The format is b
 - Hardened packet parsers, filesystem operations, remote feed handling, webhook delivery, configuration validation, and update rollback behavior.
 - Reject malformed, unsupported, credential-bearing, and oversized webhook or threat-feed URLs before any outbound request.
 
-[Unreleased]: https://github.com/ClementG91/MCP-FlowSentinel/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/ClementG91/MCP-FlowSentinel/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/ClementG91/MCP-FlowSentinel/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/ClementG91/MCP-FlowSentinel/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/ClementG91/MCP-FlowSentinel/releases/tag/v0.1.0

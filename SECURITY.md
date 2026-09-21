@@ -6,13 +6,13 @@ or professional incident-response tooling.
 
 ## Supported versions
 
-Security fixes are applied to the latest `0.2.x` release and the latest commit
+Security fixes are applied to the latest `0.3.x` release and the latest commit
 on `main`.
 
 | Version | Supported |
 |---------|-----------|
-| `0.2.x` | Yes |
-| `<= 0.1.x` | No |
+| `0.3.x` | Yes |
+| `<= 0.2.x` | No |
 
 ## Reporting a vulnerability
 
