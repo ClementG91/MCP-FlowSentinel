@@ -5,12 +5,14 @@ package aggregate
 import (
 	"context"
 	"fmt"
+	"log"
 	"math"
 	"net"
 	"regexp"
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/ClementG91/MCP-FlowSentinel/internal/baseline"
@@ -229,10 +231,50 @@ type flowState struct {
 	tlsCertInfo *capture.CertInfo
 }
 
+// MaxFlowsPerAggregator bounds the number of distinct flows tracked by one
+// Aggregator (one capture window or one PCAP). Packets that would create a
+// flow beyond this limit are dropped so that a scan or spoofed-source flood
+// cannot exhaust memory; packets for already-tracked flows are still counted.
+// Normal traffic stays far below this bound, and scan detection still sees
+// the first MaxFlowsPerAggregator flows. Under concurrent writers the bound
+// may be exceeded by at most one flow per writer goroutine.
+const MaxFlowsPerAggregator = 250_000
+
+// maxFlows is the effective limit; tests lower it.
+var maxFlows int64 = MaxFlowsPerAggregator
+
 // Aggregator accumulates PacketEvents into flow states using a sync.Map
-// for lock-free concurrent writes across goroutines.
+// for lock-free concurrent writes across goroutines. The zero value is ready
+// to use.
 type Aggregator struct {
-	flows sync.Map // FlowKey → *flowState
+	flows        sync.Map // FlowKey → *flowState
+	flowCount    atomic.Int64
+	droppedFlows atomic.Int64
+	limitLogged  atomic.Bool
+}
+
+// DroppedPackets reports how many packets were discarded because they would
+// have created a flow beyond MaxFlowsPerAggregator.
+func (a *Aggregator) DroppedPackets() int64 { return a.droppedFlows.Load() }
+
+// flowFor returns the state for key, creating it while under the flow limit.
+// It returns nil when the flow is new and the limit has been reached.
+func (a *Aggregator) flowFor(key FlowKey) *flowState {
+	if v, ok := a.flows.Load(key); ok {
+		return v.(*flowState)
+	}
+	if a.flowCount.Load() >= maxFlows {
+		a.droppedFlows.Add(1)
+		if a.limitLogged.CompareAndSwap(false, true) {
+			log.Printf("aggregate: flow limit %d reached; ignoring packets for new flows in this window", maxFlows)
+		}
+		return nil
+	}
+	v, loaded := a.flows.LoadOrStore(key, &flowState{})
+	if !loaded {
+		a.flowCount.Add(1)
+	}
+	return v.(*flowState)
 }
 
 // PacketEvent mirrors capture.PacketEvent but uses net.IP to avoid an
@@ -315,8 +357,10 @@ func (a *Aggregator) Add(pkt PacketEvent) {
 		Interface: pkt.Interface,
 	}
 
-	v, _ := a.flows.LoadOrStore(key, &flowState{})
-	fs := v.(*flowState)
+	fs := a.flowFor(key)
+	if fs == nil {
+		return
+	}
 
 	fs.mu.Lock()
 	if !pkt.EnrichmentOnly {

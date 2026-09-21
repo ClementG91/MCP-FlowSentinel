@@ -27,6 +27,11 @@ import (
 	"time"
 )
 
+// maxFeedBytes caps how much of a remote threat feed is read, so a
+// compromised or misbehaving feed URL cannot exhaust memory. Public feeds are
+// a few megabytes.
+var maxFeedBytes int64 = 128 << 20 // var so tests can lower it
+
 // hasshFeedEntry is a single entry from a remote or local HASSH feed.
 type hasshFeedEntry struct {
 	Hash        string `json:"hash"`
@@ -142,7 +147,7 @@ func fetchHasshCSV(client *http.Client, url, source string, dst map[string]hassh
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("HTTP %d", resp.StatusCode)
 	}
-	return parseHasshCSV(resp.Body, source, dst)
+	return parseHasshCSV(io.LimitReader(resp.Body, maxFeedBytes), source, dst)
 }
 
 func loadHasshCSVFile(path, source string, dst map[string]hasshFeedEntry) error {

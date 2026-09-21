@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -1417,5 +1418,65 @@ func TestScore_IPv6RH0AndFragment_Combined(t *testing.T) {
 	rec := records[0]
 	if rec.SuspicionScore < 2.0 {
 		t.Errorf("expected score >= 2.0 for RH0+fragment combination, got %.2f", rec.SuspicionScore)
+	}
+}
+
+func TestAggregatorAdd_BoundsDistinctFlows(t *testing.T) {
+	orig := maxFlows
+	maxFlows = 3
+	t.Cleanup(func() { maxFlows = orig })
+
+	agg := &Aggregator{}
+	now := time.Now()
+	pkt := func(srcPort uint16) PacketEvent {
+		return PacketEvent{
+			SrcIP: net.ParseIP("10.0.0.1"), DstIP: net.ParseIP("192.0.2.9"),
+			SrcPort: srcPort, DstPort: 443, Proto: "TCP", PayloadLen: 10, Timestamp: now,
+		}
+	}
+	// A scan-like burst: 10 distinct flows, only 3 may be tracked.
+	for port := uint16(1000); port < 1010; port++ {
+		agg.Add(pkt(port))
+	}
+	// Packets for an already-tracked flow are still counted past the limit.
+	agg.Add(pkt(1000))
+
+	if got := agg.DroppedPackets(); got != 7 {
+		t.Errorf("DroppedPackets() = %d, want 7", got)
+	}
+	records := agg.Finalize(nil, nil)
+	if len(records) != 3 {
+		t.Fatalf("tracked flows = %d, want 3", len(records))
+	}
+	for _, r := range records {
+		if r.SrcPort == 1000 && r.PacketCount != 2 {
+			t.Errorf("tracked flow packet count = %d, want 2", r.PacketCount)
+		}
+	}
+}
+
+func TestAggregatorAdd_ConcurrentWritersRespectFlowLimit(t *testing.T) {
+	orig := maxFlows
+	maxFlows = 100
+	t.Cleanup(func() { maxFlows = orig })
+
+	agg := &Aggregator{}
+	const writers = 8
+	var wg sync.WaitGroup
+	for w := 0; w < writers; w++ {
+		wg.Add(1)
+		go func(w int) {
+			defer wg.Done()
+			for i := 0; i < 500; i++ {
+				agg.Add(PacketEvent{
+					SrcIP: net.ParseIP("10.0.0.1"), DstIP: net.ParseIP("192.0.2.9"),
+					SrcPort: uint16(w*1000 + i), DstPort: 80, Proto: "TCP",
+				})
+			}
+		}(w)
+	}
+	wg.Wait()
+	if got := agg.flowCount.Load(); got < 100 || got > 100+writers {
+		t.Fatalf("flowCount = %d, want within [100, %d]", got, 100+writers)
 	}
 }

@@ -203,3 +203,27 @@ func TestIPRepSourceLabel(t *testing.T) {
 		}
 	}
 }
+
+func TestUpdateIPRep_StopsReadingAtFeedSizeLimit(t *testing.T) {
+	resetIPRep()
+	t.Cleanup(resetIPRep)
+	const first = "203.0.113.42\n"
+	orig := maxFeedBytes
+	maxFeedBytes = int64(len(first))
+	t.Cleanup(func() { maxFeedBytes = orig })
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(first + "198.51.100.7\n192.0.2.1\n"))
+	}))
+	defer srv.Close()
+
+	if err := UpdateIPRep([]string{srv.URL}, ""); err != nil {
+		t.Fatalf("UpdateIPRep: %v", err)
+	}
+	if _, ok := IPRepLookup("203.0.113.42"); !ok {
+		t.Error("entry within the size limit was not loaded")
+	}
+	if _, ok := IPRepLookup("198.51.100.7"); ok {
+		t.Error("entry beyond the size limit was loaded")
+	}
+}

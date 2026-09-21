@@ -112,9 +112,9 @@ func UpdateDomRep(urls []string, localFile string) error {
 		}
 		src := domRepSourceLabel(u)
 		if strings.Contains(strings.ToLower(u), "threatfox") {
-			parseDomRepThreatFox(resp.Body, src, domains)
+			parseDomRepThreatFox(io.LimitReader(resp.Body, maxFeedBytes), src, domains)
 		} else {
-			parseDomRepText(resp.Body, src, domains)
+			parseDomRepText(io.LimitReader(resp.Body, maxFeedBytes), src, domains)
 		}
 		resp.Body.Close()
 	}
