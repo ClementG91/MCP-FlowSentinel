@@ -1,0 +1,13 @@
+# Vulnerabilities reviewed and accepted for OSV-based scanners (OpenSSF
+# Scorecard). govulncheck in CI stays blocking and is not affected by this file.
+# Every entry must name the reason and expire so it is reviewed again.
+
+[[IgnoredVulns]]
+id = "GO-2026-5932"
+ignoreUntil = 2027-03-21T00:00:00Z
+reason = """
+golang.org/x/crypto/openpgp is deprecated and has no fixed version. It is only
+present in the module graph through sigstore-go; no openpgp package is compiled
+into mcp-flowsentinel (go list -deps ./... | grep x/crypto/openpgp is empty) and
+govulncheck reports it as not reachable.
+"""
