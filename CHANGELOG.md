@@ -4,6 +4,15 @@ All notable changes to this project are documented in this file. The format is b
 
 ## [Unreleased]
 
+### Security
+
+- Built with Go 1.27.1, the current Go release. Compiled dependencies are refreshed: `golang.org/x/crypto` v0.57.0, `golang.org/x/net` v0.59.0, `golang.org/x/sys` v0.48.0, `google.golang.org/grpc` v1.84.0 and `google.golang.org/protobuf` v1.36.12.
+- Release notes now include the `gh attestation verify` command and the manual upgrade path for v0.2.0 installations.
+
+### Changed
+
+- CI tools upgraded: staticcheck v0.8.1 (needed for Go 1.27), govulncheck v1.8.0 and gosec v2.29.0. The gosec exclusion list is unchanged.
+
 ## [0.3.0] - 2026-09-21
 
 ### Security

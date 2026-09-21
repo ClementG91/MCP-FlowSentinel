@@ -21,7 +21,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: "1.26.8"
+          go-version: "1.27.1"
           cache: true
       - name: Install libpcap
         run: sudo apt-get update -qq && sudo apt-get install -y libpcap-dev
@@ -32,7 +32,7 @@ jobs:
       - name: Run tests with race detector
         run: go test -race -shuffle=on ./...
       - name: Check known vulnerabilities
-        run: go run golang.org/x/vuln/cmd/govulncheck@v1.6.0 ./...
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.8.0 ./...
 
   # ── Linux amd64 ──────────────────────────────────────────────────────────────
   build-linux-amd64:
@@ -43,7 +43,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: "1.26.8"
+          go-version: "1.27.1"
           cache: true
       - name: Install libpcap
         run: sudo apt-get update -qq && sudo apt-get install -y libpcap-dev
@@ -68,7 +68,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: "1.26.8"
+          go-version: "1.27.1"
           cache: true
       - name: Install libpcap
         run: sudo apt-get update -qq && sudo apt-get install -y libpcap-dev
@@ -93,7 +93,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: "1.26.8"
+          go-version: "1.27.1"
           cache: true
       - name: Install libpcap
         run: brew install libpcap
@@ -118,7 +118,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: "1.26.8"
+          go-version: "1.27.1"
           cache: true
       - name: Install libpcap
         run: brew install libpcap
@@ -145,7 +145,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: "1.26.8"
+          go-version: "1.27.1"
           cache: true
       - name: Install cross-compile toolchain
         run: sudo apt-get update -qq && sudo apt-get install -y mingw-w64 unzip
@@ -243,7 +243,18 @@ jobs:
             mcp-flowsentinel --update
             ```
 
-            ## Verify
+            ## Verify authenticity
+            `--update` verifies the Sigstore provenance in `attestation.sigstore.json` automatically. To verify a manual download:
+            ```bash
+            gh attestation verify mcp-flowsentinel-linux-amd64 \
+              --repo ClementG91/MCP-FlowSentinel \
+              --signer-workflow ClementG91/MCP-FlowSentinel/.github/workflows/release.yml \
+              --source-ref refs/tags/${{ github.ref_name }}
+            sha256sum --check --ignore-missing SHA256SUMS.txt
+            ```
+            Installations on v0.2.0 or earlier do not verify updates: download this release manually and verify it as above.
+
+            ## Check the installation
             ```
             mcp-flowsentinel --check
             ```
