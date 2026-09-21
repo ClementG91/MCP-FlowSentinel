@@ -8,6 +8,9 @@ All notable changes to this project are documented in this file. The format is b
 
 - Raised the minimum Go toolchain to 1.25.13 to pick up standard-library fixes for GO-2026-6218 (`net/url`), GO-2026-6090 (`crypto/tls`), GO-2026-6089 and GO-2026-5026 (`net/http`), and GO-2026-5972 (`encoding/asn1`).
 
+- `--update` now verifies release authenticity, not just integrity: it requires the `attestation.sigstore.json` Sigstore bundle, checks it against the Sigstore public-good trust root, and only accepts SLSA provenance signed by this repository's `release.yml` for the exact release tag that lists the binary's SHA-256. Releases without a valid attestation are refused.
+- Releases now publish their provenance bundle as the `attestation.sigstore.json` asset.
+
 ### Changed
 
 - Upgraded `modelcontextprotocol/go-sdk` from v1.7.0 to v1.8.0.
