@@ -41,18 +41,18 @@ if (-not $isAdmin) {
 }
 
 # -- Step 1: Check / install Go -----------------------------------------------
-Write-Step "Checking Go (>= 1.25.12)..."
+Write-Step "Checking Go (>= 1.25.13)..."
 $goOk = $false
 try {
     $goRaw = & go version 2>&1
     if ($LASTEXITCODE -eq 0 -and $goRaw -match "go(\d+)\.(\d+)(?:\.(\d+))?") {
         $maj = [int]$Matches[1]; $min = [int]$Matches[2]; $patch = 0
         if ($Matches.Count -gt 3 -and $Matches[3]) { $patch = [int]$Matches[3] }
-        if ($maj -gt 1 -or ($maj -eq 1 -and ($min -gt 25 -or ($min -eq 25 -and $patch -ge 12)))) {
+        if ($maj -gt 1 -or ($maj -eq 1 -and ($min -gt 25 -or ($min -eq 25 -and $patch -ge 13)))) {
             $goOk = $true
             Write-Ok "$goRaw"
         } else {
-            Write-Warn "Go $maj.$min.$patch found, but 1.25.12+ required."
+            Write-Warn "Go $maj.$min.$patch found, but 1.25.13+ required."
         }
     }
 } catch {}
