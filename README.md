@@ -114,9 +114,12 @@ mcp-flowsentinel --update
 
 Checks GitHub for a newer release and replaces the binary in-place. Set `GITHUB_TOKEN` to avoid rate limits when running multiple instances.
 
-Self-update is available only when a release exists. The updater verifies the
-download against the release's `SHA256SUMS.txt` and restores the previous binary
-if replacement fails.
+Self-update is available only when a release exists. Before downloading, the
+updater verifies the release's Sigstore provenance attestation: it must be
+signed by this repository's `release.yml` workflow for the exact release tag and
+list the platform binary with the digest published in `SHA256SUMS.txt`. Updates
+without a valid attestation are refused. The previous binary is restored if
+replacement fails. See [SECURITY.md](SECURITY.md#verifying-releases).
 
 ---
 

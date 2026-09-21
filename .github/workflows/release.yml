@@ -206,9 +206,18 @@ jobs:
         run: sha256sum -- mcp-flowsentinel-* sbom.spdx.json > SHA256SUMS.txt && cat SHA256SUMS.txt
 
       - name: Attest build provenance
+        id: attest
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         with:
           subject-checksums: dist/SHA256SUMS.txt
+
+      # mcp-flowsentinel --update refuses any release without this bundle.
+      - name: Publish provenance bundle
+        env:
+          BUNDLE_PATH: ${{ steps.attest.outputs.bundle-path }}
+        run: |
+          test -s "$BUNDLE_PATH"
+          cp -- "$BUNDLE_PATH" dist/attestation.sigstore.json
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2

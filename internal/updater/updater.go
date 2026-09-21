@@ -1,5 +1,7 @@
 // Package updater checks for newer releases on GitHub and replaces the running
-// binary in-place. It is intentionally dependency-free (stdlib only).
+// binary in-place. Before installing anything it requires the release to carry
+// a Sigstore provenance attestation produced by this repository's release.yml
+// workflow for the exact release tag (see provenance.go).
 package updater
 
 import (
@@ -91,6 +93,10 @@ func CheckAndUpdate(currentVersion string) error {
 	if err != nil {
 		return fmt.Errorf("cannot verify release asset: %w", err)
 	}
+	if err := verifyReleaseProvenance(ctx, release, assetName, expectedSHA256); err != nil {
+		return fmt.Errorf("refusing unauthenticated update: %w", err)
+	}
+	fmt.Printf("Provenance      : signed by %s\n", releaseSignerIdentity(release.TagName))
 
 	fmt.Printf("\nDownloading %s ...\n", assetName)
 
@@ -120,26 +126,33 @@ func findAsset(assets []Asset, name string) *Asset {
 	return nil
 }
 
+// verifyReleaseProvenance proves that expectedSHA256 for assetName was
+// attested by release.yml running for release.TagName. The binary is later
+// checked against the same digest, which binds it to the attestation.
+func verifyReleaseProvenance(ctx context.Context, release *Release, assetName, expectedSHA256 string) error {
+	provenanceAsset := findAsset(release.Assets, provenanceAssetName)
+	if provenanceAsset == nil {
+		return fmt.Errorf("release %s has no %s asset", release.TagName, provenanceAssetName)
+	}
+	data, err := fetchLimited(ctx, provenanceAsset.BrowserDownloadURL, maxProvenanceSize)
+	if err != nil {
+		return fmt.Errorf("download provenance: %w", err)
+	}
+	entities, err := parseProvenance(data)
+	if err != nil {
+		return err
+	}
+	verifier, err := newProvenanceVerifier(ctx)
+	if err != nil {
+		return err
+	}
+	return verifier.verifyAsset(entities, release.TagName, assetName, expectedSHA256)
+}
+
 func fetchExpectedChecksum(ctx context.Context, src, assetName string) (string, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, src, nil)
+	data, err := fetchLimited(ctx, src, maxChecksumFileSize)
 	if err != nil {
-		return "", err
-	}
-	req.Header.Set("User-Agent", "mcp-flowsentinel-updater")
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("checksum download returned HTTP %d", resp.StatusCode)
-	}
-	data, err := io.ReadAll(io.LimitReader(resp.Body, maxChecksumFileSize+1))
-	if err != nil {
-		return "", fmt.Errorf("read checksum file: %w", err)
-	}
-	if len(data) > maxChecksumFileSize {
-		return "", fmt.Errorf("checksum file exceeds %d bytes", maxChecksumFileSize)
+		return "", fmt.Errorf("checksum file: %w", err)
 	}
 	for _, line := range strings.Split(string(data), "\n") {
 		fields := strings.Fields(line)
@@ -154,6 +167,31 @@ func fetchExpectedChecksum(ctx context.Context, src, assetName string) (string, 
 		return checksum, nil
 	}
 	return "", fmt.Errorf("SHA-256 checksum for %s not found", assetName)
+}
+
+// fetchLimited downloads src and fails if the body exceeds limit bytes.
+func fetchLimited(ctx context.Context, src string, limit int64) ([]byte, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, src, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("User-Agent", "mcp-flowsentinel-updater")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("download returned HTTP %d", resp.StatusCode)
+	}
+	data, err := io.ReadAll(io.LimitReader(resp.Body, limit+1))
+	if err != nil {
+		return nil, fmt.Errorf("read body: %w", err)
+	}
+	if int64(len(data)) > limit {
+		return nil, fmt.Errorf("body exceeds %d bytes", limit)
+	}
+	return data, nil
 }
 
 // latestRelease calls the GitHub API and returns the latest release.
