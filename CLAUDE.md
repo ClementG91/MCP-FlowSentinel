@@ -2,7 +2,7 @@
 
 Guidance for AI coding agents working in this repository.
 
-MCP-FlowSentinel is a Go 1.25 MCP server (stdio transport, official
+MCP-FlowSentinel is a Go 1.26 MCP server (stdio transport, official
 `modelcontextprotocol/go-sdk`) that captures packets with libpcap/Npcap,
 attributes flows to local processes and scores them with behavioral detection
 signals. The public GitHub repository `ClementG91/MCP-FlowSentinel` is the

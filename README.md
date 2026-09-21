@@ -290,7 +290,7 @@ chmod +x build-macos.sh && ./build-macos.sh
 ```
 
 ### Requirements
-- Go 1.25.13+
+- Go 1.26.8+
 - CGO enabled
 - libpcap dev headers (`libpcap-dev` on Debian/Ubuntu, `libpcap` via Homebrew on macOS)
 - Windows: [Npcap SDK](https://npcap.com/#download) + GCC (MinGW-w64)
