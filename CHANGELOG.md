@@ -15,6 +15,13 @@ All notable changes to this project are documented in this file. The format is b
 
 - Upgraded `modelcontextprotocol/go-sdk` from v1.7.0 to v1.8.0.
 - Pinned GitHub-hosted Ubuntu runners to `ubuntu-24.04` instead of `ubuntu-latest`.
+- The daemon and command-line entry point expose test seams for capture, interface enumeration, the clock and external side effects; runtime behavior is unchanged.
+
+### Tests
+
+- Daemon capture windows, auto-selection, feed updaters and runtime statistics are exercised with offline PCAP replay (daemon coverage 14.6% → 86%).
+- Every CLI command (`--help`, `--version`, `--update`, `--init-config`, `--validate-config`, `--test-alert`, `--check`, `--daemon`, stdio mode) and configuration error path is covered without live capture (main package coverage 9.9% → 90%+).
+- CI enforces per-package coverage floors of 40% for the main package and 60% for `internal/daemon`, in addition to the 70% global minimum.
 
 ### Documentation
 

@@ -108,6 +108,33 @@ jobs:
           python3 -c "import sys; cov=float('${TOTAL}'); sys.exit(0 if cov>=70 else 1)" \
             || (echo "::error::Coverage ${TOTAL}% is below the 70% minimum" && exit 1)
 
+      # ── Per-package floors for historically under-tested packages ──────────
+      - name: Enforce per-package coverage floors
+        if: runner.os == 'Linux'
+        run: |
+          # coverage.out lines: <pkg>/<file>.go:<range> <statements> <hits>
+          awk -F'[: ]' 'NR > 1 {
+              pkg = $1; sub(/\/[^\/]*$/, "", pkg)
+              total[pkg] += $(NF-1); if ($NF > 0) covered[pkg] += $(NF-1)
+            }
+            END { for (p in total) printf "%s %.1f\n", p, 100 * covered[p] / total[p] }' \
+            coverage.out | sort > package-coverage.txt
+          cat package-coverage.txt
+          failed=0
+          while read -r pkg floor; do
+            pct=$(awk -v p="$pkg" '$1 == p { print $2 }' package-coverage.txt)
+            if [ -z "$pct" ]; then
+              echo "::error::No coverage data for ${pkg}"; failed=1; continue
+            fi
+            if ! awk -v c="$pct" -v f="$floor" 'BEGIN { exit !(c >= f) }'; then
+              echo "::error::${pkg} coverage ${pct}% is below the ${floor}% floor"; failed=1
+            fi
+          done <<'FLOORS'
+          github.com/ClementG91/MCP-FlowSentinel 40
+          github.com/ClementG91/MCP-FlowSentinel/internal/daemon 60
+          FLOORS
+          exit "$failed"
+
       - name: Upload coverage report
         if: runner.os == 'Linux'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

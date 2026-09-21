@@ -26,6 +26,18 @@ import (
 	"github.com/ClementG91/MCP-FlowSentinel/internal/metrics"
 )
 
+// ─── Test seams ───────────────────────────────────────────────────────────────
+
+// Package-level seams let tests replay offline captures and control the clock
+// without opening a live interface. Production code uses the real
+// implementations below.
+var (
+	capturePackets   = capture.CapturePackets
+	listInterfaces   = capture.ListInterfaces
+	buildSocketTable = correlate.BuildSocketTableCached
+	now              = time.Now
+)
+
 // ─── Runtime statistics ───────────────────────────────────────────────────────
 
 var (
@@ -85,7 +97,7 @@ func GetStats() Stats {
 	}
 	if !st.IsZero() {
 		s.StartTime = st
-		s.UptimeSec = int64(time.Since(st).Seconds())
+		s.UptimeSec = int64(now().Sub(st).Seconds())
 	}
 	return s
 }
@@ -116,7 +128,7 @@ func Run(ctx context.Context) error {
 
 	running.Store(true)
 	startTimeMu.Lock()
-	startTime = time.Now()
+	startTime = now()
 	activeIface = primaryIface
 	startTimeMu.Unlock()
 	activeIfacesMu.Lock()
@@ -281,7 +293,7 @@ func runWindow(ctx context.Context, ifaces []string, bpfFilter string, dur time.
 	defer cancel()
 
 	var tablePtr atomic.Pointer[correlate.SocketTable]
-	tablePtr.Store(correlate.BuildSocketTableCached(procCache))
+	tablePtr.Store(buildSocketTable(procCache))
 
 	// Refresh socket table every 2 s for long windows.
 	go func() {
@@ -292,7 +304,7 @@ func runWindow(ctx context.Context, ifaces []string, bpfFilter string, dur time.
 			case <-winCtx.Done():
 				return
 			case <-ticker.C:
-				tablePtr.Store(correlate.BuildSocketTableCached(procCache))
+				tablePtr.Store(buildSocketTable(procCache))
 			}
 		}
 	}()
@@ -305,7 +317,7 @@ func runWindow(ctx context.Context, ifaces []string, bpfFilter string, dur time.
 		wg.Add(1)
 		go func(ifaceName string) {
 			defer wg.Done()
-			pktCh, err := capture.CapturePackets(winCtx, ifaceName, bpfFilter)
+			pktCh, err := capturePackets(winCtx, ifaceName, bpfFilter)
 			if err != nil {
 				log.Printf("daemon: capture %q: %v", ifaceName, err)
 				return
@@ -340,7 +352,7 @@ func runWindow(ctx context.Context, ifaces []string, bpfFilter string, dur time.
 
 	// Build a recurrence map from the last 24 h of history before scoring.
 	// This is O(history_size) once per window, amortised to O(1) per flow.
-	recMap := history.RecurrenceMap(time.Now().Add(-24 * time.Hour))
+	recMap := history.RecurrenceMap(now().Add(-24 * time.Hour))
 	recurrenceResolver := func(srcIP, dstIP string, dstPort uint16, proto string) int {
 		if recMap == nil {
 			return 0
@@ -423,7 +435,7 @@ func resolveInterfaces(single string, list []string) []string {
 // pickInterface returns the first non-loopback interface with an assigned
 // unicast address, as a best-effort auto-selection for daemon mode.
 func pickInterface() (string, error) {
-	ifaces, err := capture.ListInterfaces()
+	ifaces, err := listInterfaces()
 	if err != nil {
 		return "", err
 	}
