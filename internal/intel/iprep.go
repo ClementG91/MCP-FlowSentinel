@@ -25,6 +25,11 @@ import (
 	"time"
 )
 
+// maxFeedBytes caps how much of a remote threat feed is read, so a
+// compromised or misbehaving feed URL cannot exhaust memory. Public feeds are
+// a few megabytes.
+var maxFeedBytes int64 = 128 << 20 // var so tests can lower it
+
 // ipRepEntry records why an IP is considered malicious.
 type ipRepEntry struct {
 	Source string `json:"source"`
@@ -145,7 +150,7 @@ func UpdateIPRep(urls []string, localFile string) error {
 			continue
 		}
 		src, lbl := ipRepSourceLabel(url)
-		ingest(resp.Body, src, lbl)
+		ingest(io.LimitReader(resp.Body, maxFeedBytes), src, lbl)
 		resp.Body.Close()
 	}
 
