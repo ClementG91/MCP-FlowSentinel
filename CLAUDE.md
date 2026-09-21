@@ -1,133 +1,75 @@
-<!-- rtk-instructions v2 -->
-# RTK (Rust Token Killer) - Token-Optimized Commands
+# CLAUDE.md
 
-## Golden Rule
+Guidance for AI coding agents working in this repository.
 
-**Always prefix commands with `rtk`**. If RTK has a dedicated filter, it uses it. If not, it passes through unchanged. This means RTK is always safe to use.
+MCP-FlowSentinel is a Go 1.25 MCP server (stdio transport, official
+`modelcontextprotocol/go-sdk`) that captures packets with libpcap/Npcap,
+attributes flows to local processes and scores them with behavioral detection
+signals. The public GitHub repository `ClementG91/MCP-FlowSentinel` is the
+source of truth.
 
-**Important**: Even in command chains with `&&`, use `rtk`:
+## Package layout
+
+| Path | Responsibility |
+|------|----------------|
+| `main.go` | CLI (`run(args, stdout, stderr) int`), MCP server bootstrap, `--check` / `--test-alert` / `--daemon` |
+| `privileges_{unix,windows}.go` | Capture privilege checks used by `--check` |
+| `internal/config` | YAML config, env overrides, validation, global singleton (`Get`/`Set`/`Load`) |
+| `internal/capture` | Live capture (`CapturePackets`), offline `OfflineReader` (pure-Go pcap/pcapng), protocol parsers, TCP reassembly, HASSH |
+| `internal/correlate` | Socket 4-tuple → process mapping (gopsutil) with a process cache |
+| `internal/aggregate` | Flow aggregation, scoring, filters (`min_score`, `top_n`) |
+| `internal/baseline` | Per-process statistical baseline and persistence |
+| `internal/intel` | GeoIP, IP and domain reputation feeds, MITRE mapping |
+| `internal/ja3` | JA3/JA3S fingerprints and feed |
+| `internal/history` | Rolling JSONL flow history with gzip rotation |
+| `internal/alerting` | Webhook alerts (dedup, HMAC) and alert log |
+| `internal/daemon` | Continuous capture windows and feed updaters |
+| `internal/metrics` | Prometheus endpoint |
+| `internal/tools` | One file per MCP tool, registered in `register.go` |
+| `internal/updater` | `--update`: SHA256SUMS + Sigstore provenance verification, atomic replace |
+| `internal/cache` | Generic bounded LRU |
+
+Details: [docs/architecture.md](docs/architecture.md). Output contract:
+[docs/flow_record_schema.md](docs/flow_record_schema.md).
+
+## Build
+
+CGO is required (gopacket/pcap).
+
+- **Linux:** `sudo apt-get install libpcap-dev` (Fedora: `libpcap-devel`), then `go build ./...` or `./build-linux.sh`.
+- **macOS:** `brew install libpcap`, then `go build ./...` or `./build-macos.sh`.
+- **Windows:** install the Npcap runtime (WinPcap API-compatible mode) and the
+  [Npcap SDK](https://npcap.com/#download) (e.g. `C:\npcap-sdk`), then
+  `.\build-windows.ps1`, or set
+  `CGO_CFLAGS=-IC:\npcap-sdk\Include` and `CGO_LDFLAGS=-LC:\npcap-sdk\Lib\x64` before `go build ./...`.
+  Offline tests do not need the Npcap runtime.
+
+## Verification (must pass before every PR)
+
 ```bash
-# ❌ Wrong
-git add . && git commit -m "msg" && git push
-
-# ✅ Correct
-rtk git add . && rtk git commit -m "msg" && rtk git push
+go mod tidy -diff && gofmt -l . && go vet ./... && go test -race -shuffle=on ./...
+go run honnef.co/go/tools/cmd/staticcheck@v0.7.0 ./...
+go run golang.org/x/vuln/cmd/govulncheck@v1.6.0 ./...
+go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
+go run github.com/securego/gosec/v2/cmd/gosec@v2.28.0 -quiet -exclude='G103,G104,G302,G304,G703' ./...
 ```
 
-## RTK Commands by Workflow
+CI also enforces 70% total coverage and per-package floors (main 40%,
+`internal/daemon` 60%).
 
-### Build & Compile (80-90% savings)
-```bash
-rtk cargo build         # Cargo build output
-rtk cargo check         # Cargo check output
-rtk cargo clippy        # Clippy warnings grouped by file (80%)
-rtk tsc                 # TypeScript errors grouped by file/code (83%)
-rtk lint                # ESLint/Biome violations grouped (84%)
-rtk prettier --check    # Files needing format only (70%)
-rtk next build          # Next.js build with route metrics (87%)
-```
+## Conventions
 
-### Test (90-99% savings)
-```bash
-rtk cargo test          # Cargo test failures only (90%)
-rtk vitest run          # Vitest failures only (99.5%)
-rtk playwright test     # Playwright failures only (94%)
-rtk test <cmd>          # Generic test wrapper - failures only
-```
-
-### Git (59-80% savings)
-```bash
-rtk git status          # Compact status
-rtk git log             # Compact log (works with all git flags)
-rtk git diff            # Compact diff (80%)
-rtk git show            # Compact show (80%)
-rtk git add             # Ultra-compact confirmations (59%)
-rtk git commit          # Ultra-compact confirmations (59%)
-rtk git push            # Ultra-compact confirmations
-rtk git pull            # Ultra-compact confirmations
-rtk git branch          # Compact branch list
-rtk git fetch           # Compact fetch
-rtk git stash           # Compact stash
-rtk git worktree        # Compact worktree
-```
-
-Note: Git passthrough works for ALL subcommands, even those not explicitly listed.
-
-### GitHub (26-87% savings)
-```bash
-rtk gh pr view <num>    # Compact PR view (87%)
-rtk gh pr checks        # Compact PR checks (79%)
-rtk gh run list         # Compact workflow runs (82%)
-rtk gh issue list       # Compact issue list (80%)
-rtk gh api              # Compact API responses (26%)
-```
-
-### JavaScript/TypeScript Tooling (70-90% savings)
-```bash
-rtk pnpm list           # Compact dependency tree (70%)
-rtk pnpm outdated       # Compact outdated packages (80%)
-rtk pnpm install        # Compact install output (90%)
-rtk npm run <script>    # Compact npm script output
-rtk npx <cmd>           # Compact npx command output
-rtk prisma              # Prisma without ASCII art (88%)
-```
-
-### Files & Search (60-75% savings)
-```bash
-rtk ls <path>           # Tree format, compact (65%)
-rtk read <file>         # Code reading with filtering (60%)
-rtk grep <pattern>      # Search grouped by file (75%)
-rtk find <pattern>      # Find grouped by directory (70%)
-```
-
-### Analysis & Debug (70-90% savings)
-```bash
-rtk err <cmd>           # Filter errors only from any command
-rtk log <file>          # Deduplicated logs with counts
-rtk json <file>         # JSON structure without values
-rtk deps                # Dependency overview
-rtk env                 # Environment variables compact
-rtk summary <cmd>       # Smart summary of command output
-rtk diff                # Ultra-compact diffs
-```
-
-### Infrastructure (85% savings)
-```bash
-rtk docker ps           # Compact container list
-rtk docker images       # Compact image list
-rtk docker logs <c>     # Deduplicated logs
-rtk kubectl get         # Compact resource list
-rtk kubectl logs        # Deduplicated pod logs
-```
-
-### Network (65-70% savings)
-```bash
-rtk curl <url>          # Compact HTTP responses (70%)
-rtk wget <url>          # Compact download output (65%)
-```
-
-### Meta Commands
-```bash
-rtk gain                # View token savings statistics
-rtk gain --history      # View command history with savings
-rtk discover            # Analyze Claude Code sessions for missed RTK usage
-rtk proxy <cmd>         # Run command without filtering (for debugging)
-rtk init                # Add RTK instructions to CLAUDE.md
-rtk init --global       # Add RTK to ~/.claude/CLAUDE.md
-```
-
-## Token Savings Overview
-
-| Category | Commands | Typical Savings |
-|----------|----------|-----------------|
-| Tests | vitest, playwright, cargo test | 90-99% |
-| Build | next, tsc, lint, prettier | 70-87% |
-| Git | status, log, diff, add, commit | 59-80% |
-| GitHub | gh pr, gh run, gh issue | 26-87% |
-| Package Managers | pnpm, npm, npx | 70-90% |
-| Files | ls, read, grep, find | 60-75% |
-| Infrastructure | docker, kubectl | 85% |
-| Network | curl, wget | 65-70% |
-
-Overall average: **60-90% token reduction** on common development operations.
-<!-- /rtk-instructions -->
+- Work on a branch and open a PR; never push to `main`. Squash or rebase merges only (linear history).
+- Conventional Commits: `feat:`, `fix:`, `test:`, `docs:`, `chore:`.
+- Update `CHANGELOG.md` under `[Unreleased]` for user-visible changes.
+- Tests must never open a live interface (`pcap.OpenLive`). Replay generated
+  PCAPs through `capture.OfflineReader` and use the package-level seams in
+  `main.go` and `internal/daemon` (`capturePackets`, `listInterfaces`, `now`, …).
+  Isolate globals with `config.Set`, `history.SetPathForTesting` and
+  `alerting.SetAlertLogPathForTesting`.
+- Do not weaken CI: no new gosec exclusions, govulncheck stays blocking.
+- Detection behavior and `docs/flow_record_schema.md` are a public contract;
+  flag any change to scoring or the schema explicitly in the PR.
+- stdout is reserved for MCP JSON-RPC in server modes; log to stderr.
+- Pin GitHub Actions by commit SHA and runners by version (`ubuntu-24.04`).
+- Outbound URLs from config must go through `config.ValidateHTTPURL`.

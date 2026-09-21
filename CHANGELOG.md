@@ -7,7 +7,6 @@ All notable changes to this project are documented in this file. The format is b
 ### Security
 
 - Raised the minimum Go toolchain to 1.25.13 to pick up standard-library fixes for GO-2026-6218 (`net/url`), GO-2026-6090 (`crypto/tls`), GO-2026-6089 and GO-2026-5026 (`net/http`), and GO-2026-5972 (`encoding/asn1`).
-
 - `--update` now verifies release authenticity, not just integrity: it requires the `attestation.sigstore.json` Sigstore bundle, checks it against the Sigstore public-good trust root, and only accepts SLSA provenance signed by this repository's `release.yml` for the exact release tag that lists the binary's SHA-256. Releases without a valid attestation are refused.
 - Releases now publish their provenance bundle as the `attestation.sigstore.json` asset.
 
@@ -25,6 +24,8 @@ All notable changes to this project are documented in this file. The format is b
 
 ### Documentation
 
+- Split the README: tool details moved to `docs/tools.md`, configuration, daemon mode, alerting, history and GeoIP to `docs/configuration.md`, and the detection engine and package layout to `docs/architecture.md`. The README keeps the overview, installation, client configuration, tool list and CLI reference.
+- Replaced `CLAUDE.md`, which held personal tooling instructions, with project guidance for coding agents: package layout, per-OS build prerequisites, verification commands and conventions.
 - Consolidated identical client and Unix installation examples into canonical blocks, removed redundant empty arguments, and corrected the Cline CLI guidance.
 - Removed the redundant standalone Codex configuration snippet; the canonical TOML example remains in the README.
 - Removed the retired Go Report Card badge after the upstream service shut down.
