@@ -16,6 +16,7 @@ Works with **Codex, ChatGPT desktop, Claude Desktop, Cursor, Cline, Continue.dev
 [![MCP 2026-07-28](https://img.shields.io/badge/MCP-2026--07--28-6f42c1)](https://modelcontextprotocol.io/specification/2026-07-28)
 [![Release](https://img.shields.io/github/v/release/ClementG91/MCP-FlowSentinel?sort=semver)](https://github.com/ClementG91/MCP-FlowSentinel/releases)
 [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/ClementG91/MCP-FlowSentinel/badge)](https://scorecard.dev/viewer/?uri=github.com/ClementG91/MCP-FlowSentinel)
+[![OpenSSF Best Practices](https://www.bestpractices.dev/projects/14746/badge)](https://www.bestpractices.dev/projects/14746)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Security policy](https://img.shields.io/badge/security-policy-blue.svg)](SECURITY.md)
 

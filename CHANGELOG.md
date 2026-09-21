@@ -4,6 +4,10 @@ All notable changes to this project are documented in this file. The format is b
 
 ## [Unreleased]
 
+### Documentation
+
+- Earned the [OpenSSF Best Practices badge](https://www.bestpractices.dev/projects/14746) (Passing) and added it to the README.
+
 ## [0.3.2] - 2026-09-21
 
 ### Security
