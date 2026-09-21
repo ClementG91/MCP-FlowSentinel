@@ -4,6 +4,8 @@ All notable changes to this project are documented in this file. The format is b
 
 ## [Unreleased]
 
+## [0.3.2] - 2026-09-21
+
 ### Security
 
 - Pinned `google.golang.org/grpc` back to v1.83.2. The v1.84.0 upgrade in 0.3.1 fell into the range affected by GHSA-2v4p-qf9q-27wj / GO-2026-6443 (xDS server crash), and no fixed release exists yet. The vulnerable code was not reachable from mcp-flowsentinel.
@@ -93,7 +95,8 @@ All notable changes to this project are documented in this file. The format is b
 - Hardened packet parsers, filesystem operations, remote feed handling, webhook delivery, configuration validation, and update rollback behavior.
 - Reject malformed, unsupported, credential-bearing, and oversized webhook or threat-feed URLs before any outbound request.
 
-[Unreleased]: https://github.com/ClementG91/MCP-FlowSentinel/compare/v0.3.1...HEAD
+[Unreleased]: https://github.com/ClementG91/MCP-FlowSentinel/compare/v0.3.2...HEAD
+[0.3.2]: https://github.com/ClementG91/MCP-FlowSentinel/compare/v0.3.1...v0.3.2
 [0.3.1]: https://github.com/ClementG91/MCP-FlowSentinel/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/ClementG91/MCP-FlowSentinel/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/ClementG91/MCP-FlowSentinel/compare/v0.1.0...v0.2.0
