@@ -7,6 +7,7 @@ All notable changes to this project are documented in this file. The format is b
 ### Security
 
 - Pinned `google.golang.org/grpc` back to v1.83.2. The v1.84.0 upgrade in 0.3.1 fell into the range affected by GHSA-2v4p-qf9q-27wj / GO-2026-6443 (xDS server crash), and no fixed release exists yet. The vulnerable code was not reachable from mcp-flowsentinel.
+- CodeQL now runs from a pinned workflow (`.github/workflows/codeql.yml`, `security-extended` queries for Go and GitHub Actions) on every pull request, including Dependabot updates that GitHub's default setup skipped, plus pushes to `main` and a weekly schedule.
 - Added `osv-scanner.toml` with a reviewed, expiring exception for GO-2026-5932. The affected `x/crypto/openpgp` package is not compiled into the binary and has no upstream fix.
 
 ## [0.3.1] - 2026-09-21
