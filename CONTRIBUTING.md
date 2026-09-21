@@ -18,7 +18,7 @@ Report suspected vulnerabilities privately as described in [SECURITY.md](SECURIT
 
 ### Prerequisites
 
-- Go 1.25.13+
+- Go 1.26.8+
 - libpcap dev headers (see [README.md](README.md) for platform-specific instructions)
 - For Windows: Npcap SDK + GCC (run `build-windows.ps1` to auto-install)
 
