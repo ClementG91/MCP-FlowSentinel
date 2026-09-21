@@ -11,6 +11,10 @@ All notable changes to this project are documented in this file. The format is b
 - `--update` now verifies release authenticity, not just integrity: it requires the `attestation.sigstore.json` Sigstore bundle, checks it against the Sigstore public-good trust root, and only accepts SLSA provenance signed by this repository's `release.yml` for the exact release tag that lists the binary's SHA-256. Releases without a valid attestation are refused.
 - Releases now publish their provenance bundle as the `attestation.sigstore.json` asset.
 
+### Fixed
+
+- An empty or comment-only configuration file now loads the built-in defaults instead of failing with `parse config …: EOF`.
+
 ### Changed
 
 - Upgraded `modelcontextprotocol/go-sdk` from v1.7.0 to v1.8.0.

@@ -8,7 +8,9 @@ package config
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
+	"io"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -681,7 +683,8 @@ func Load(path string) (*Config, error) {
 	var override Config
 	decoder := yaml.NewDecoder(bytes.NewReader(data))
 	decoder.KnownFields(true)
-	if err := decoder.Decode(&override); err != nil {
+	// An empty or comment-only file is a valid document meaning "all defaults".
+	if err := decoder.Decode(&override); err != nil && !errors.Is(err, io.EOF) {
 		return nil, fmt.Errorf("parse config %s: %w", path, err)
 	}
 	mergeOverDefaults(cfg, &override)
