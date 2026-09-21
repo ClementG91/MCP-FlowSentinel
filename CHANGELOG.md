@@ -4,6 +4,15 @@ All notable changes to this project are documented in this file. The format is b
 
 ## [Unreleased]
 
+### Security
+
+- Raised the minimum Go toolchain to 1.25.13 to pick up standard-library fixes for GO-2026-6218 (`net/url`), GO-2026-6090 (`crypto/tls`), GO-2026-6089 and GO-2026-5026 (`net/http`), and GO-2026-5972 (`encoding/asn1`).
+
+### Changed
+
+- Upgraded `modelcontextprotocol/go-sdk` from v1.7.0 to v1.8.0.
+- Pinned GitHub-hosted Ubuntu runners to `ubuntu-24.04` instead of `ubuntu-latest`.
+
 ### Documentation
 
 - Consolidated identical client and Unix installation examples into canonical blocks, removed redundant empty arguments, and corrected the Cline CLI guidance.

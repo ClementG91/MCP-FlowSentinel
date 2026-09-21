@@ -27,7 +27,7 @@ echo -e "${GRAY}  https://github.com/ClementG91/MCP-FlowSentinel${RESET}"
 echo ""
 
 # ── Step 1: Check Go ──────────────────────────────────────────────────────────
-step "Checking Go (>= 1.25.12)..."
+step "Checking Go (>= 1.25.13)..."
 if ! command -v go &>/dev/null; then
     fail "Go is not installed. Install it from https://go.dev/dl/ or via your package manager:
     Debian/Ubuntu : sudo apt-get install golang-go
@@ -40,8 +40,8 @@ GO_VERSION="$(go env GOVERSION | sed 's/^go//')"
 IFS=. read -r GO_MAJOR GO_MINOR GO_PATCH <<< "$GO_VERSION"
 GO_PATCH="${GO_PATCH%%[^0-9]*}"
 GO_PATCH="${GO_PATCH:-0}"
-if [[ $GO_MAJOR -lt 1 || ($GO_MAJOR -eq 1 && ($GO_MINOR -lt 25 || ($GO_MINOR -eq 25 && $GO_PATCH -lt 12))) ]]; then
-    fail "Go $GO_VERSION found, but 1.25.12+ required. Update: https://go.dev/dl/"
+if [[ $GO_MAJOR -lt 1 || ($GO_MAJOR -eq 1 && ($GO_MINOR -lt 25 || ($GO_MINOR -eq 25 && $GO_PATCH -lt 13))) ]]; then
+    fail "Go $GO_VERSION found, but 1.25.13+ required. Update: https://go.dev/dl/"
 fi
 ok "$(go version)"
 

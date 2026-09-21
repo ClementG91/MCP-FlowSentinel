@@ -1,11 +1,11 @@
 module github.com/ClementG91/MCP-FlowSentinel
 
-go 1.25.12
+go 1.25.13
 
 require (
 	github.com/google/gopacket v1.1.19
 	github.com/maxmind/mmdbwriter v1.2.0
-	github.com/modelcontextprotocol/go-sdk v1.7.0
+	github.com/modelcontextprotocol/go-sdk v1.8.0
 	github.com/oschwald/geoip2-golang v1.13.0
 	github.com/shirou/gopsutil/v3 v3.24.5
 	gopkg.in/yaml.v3 v3.0.1
