@@ -151,6 +151,34 @@ func TestLoad_NoFile_UsesDefaults(t *testing.T) {
 	}
 }
 
+func TestLoad_EmptyOrCommentOnlyFile_UsesDefaults(t *testing.T) {
+	original := Get()
+	defer Set(original)
+
+	for name, body := range map[string]string{
+		"empty":        "",
+		"whitespace":   "\n  \n",
+		"comment only": "# everything commented out\n# alerting:\n#   enabled: true\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "config.yaml")
+			if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			cfg, err := Load(path)
+			if err != nil {
+				t.Fatalf("Load(%q) = %v, want defaults", body, err)
+			}
+			if got, want := cfg.Capture.DefaultDurationSec, Default().Capture.DefaultDurationSec; got != want {
+				t.Errorf("DefaultDurationSec = %d, want default %d", got, want)
+			}
+			if got := LoadedPath(); got != path {
+				t.Errorf("LoadedPath() = %q, want %q", got, path)
+			}
+		})
+	}
+}
+
 func TestLoad_ValidYAML_OverridesDefaults(t *testing.T) {
 	original := Get()
 	defer Set(original)
