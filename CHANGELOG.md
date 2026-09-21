@@ -4,6 +4,8 @@ All notable changes to this project are documented in this file. The format is b
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-09-21
+
 ### Security
 
 - Built with Go 1.27.1, the current Go release. Compiled dependencies are refreshed: `golang.org/x/crypto` v0.57.0, `golang.org/x/net` v0.59.0, `golang.org/x/sys` v0.48.0, `google.golang.org/grpc` v1.84.0 and `google.golang.org/protobuf` v1.36.12.
@@ -85,7 +87,8 @@ All notable changes to this project are documented in this file. The format is b
 - Hardened packet parsers, filesystem operations, remote feed handling, webhook delivery, configuration validation, and update rollback behavior.
 - Reject malformed, unsupported, credential-bearing, and oversized webhook or threat-feed URLs before any outbound request.
 
-[Unreleased]: https://github.com/ClementG91/MCP-FlowSentinel/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/ClementG91/MCP-FlowSentinel/compare/v0.3.1...HEAD
+[0.3.1]: https://github.com/ClementG91/MCP-FlowSentinel/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/ClementG91/MCP-FlowSentinel/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/ClementG91/MCP-FlowSentinel/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/ClementG91/MCP-FlowSentinel/releases/tag/v0.1.0
