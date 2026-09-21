@@ -15,8 +15,8 @@ die()     { echo -e "${RED}ERROR${NC} $*" >&2; exit 1; }
 
 BINARY="mcp-flowsentinel"
 MIN_GO_MAJOR=1
-MIN_GO_MINOR=26
-MIN_GO_PATCH=8
+MIN_GO_MINOR=27
+MIN_GO_PATCH=1
 
 # ─── OS detection ─────────────────────────────────────────────────────────────
 OS="$(uname -s)"
@@ -83,7 +83,7 @@ fi
 # ─── Step 2: Check / install Go ──────────────────────────────────────────────
 install_go() {
     info "Installing Go ${MIN_GO_MAJOR}.${MIN_GO_MINOR}.${MIN_GO_PATCH}+..."
-    local GO_VERSION="1.26.8"
+    local GO_VERSION="1.27.1"
     local GOARCH
     case "${ARCH}" in
         x86_64|amd64)  GOARCH="amd64" ;;
