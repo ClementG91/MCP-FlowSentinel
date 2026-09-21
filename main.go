@@ -41,14 +41,34 @@ func newMCPServer() *mcp.Server {
 	return server
 }
 
+// Package-level seams let tests drive the CLI without a live interface,
+// network access or a stdio MCP session. Production uses the real
+// implementations below.
+var (
+	listInterfaces    = capture.ListInterfaces
+	capturePackets    = capture.CapturePackets
+	checkPrivilegesFn = checkPrivileges
+	checkAndUpdate    = updater.CheckAndUpdate
+	fireTestAlert     = alerting.FireTest
+	runDaemonLoop     = daemon.Run
+	serveStdio        = func(ctx context.Context, s *mcp.Server) error {
+		return s.Run(ctx, &mcp.StdioTransport{})
+	}
+)
+
 func main() {
 	// Use stderr exclusively; stdout is reserved for the MCP JSON-RPC stream.
 	log.SetOutput(os.Stderr)
 	log.SetFlags(log.LstdFlags | log.Lshortfile)
 
+	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
+}
+
+// run executes the command line and returns the process exit code.
+func run(args []string, stdout, stderr io.Writer) int {
 	// Parse --config before the switch so all flags can use the loaded config.
 	configPath := ""
-	filteredArgs := os.Args[1:]
+	filteredArgs := append([]string(nil), args...)
 	for i := 0; i < len(filteredArgs); i++ {
 		if filteredArgs[i] == "--config" && i+1 < len(filteredArgs) {
 			configPath = filteredArgs[i+1]
@@ -62,43 +82,42 @@ func main() {
 	if len(filteredArgs) > 0 {
 		switch filteredArgs[0] {
 		case "--help", "-h":
-			printUsage(os.Stdout)
-			return
+			printUsage(stdout)
+			return 0
 		case "--version", "-v":
-			fmt.Printf("mcp-flowsentinel %s\n", version)
-			return
+			fmt.Fprintf(stdout, "mcp-flowsentinel %s\n", version)
+			return 0
 		case "--update":
-			if err := updater.CheckAndUpdate(version); err != nil {
-				fmt.Fprintf(os.Stderr, "update error: %v\n", err)
-				os.Exit(1)
+			if err := checkAndUpdate(version); err != nil {
+				fmt.Fprintf(stderr, "update error: %v\n", err)
+				return 1
 			}
-			return
+			return 0
 		case "--init-config":
 			path := config.DefaultPath()
 			if len(filteredArgs) > 1 {
 				path = filteredArgs[1]
 			}
 			if err := config.WriteDefault(path); err != nil {
-				fmt.Fprintf(os.Stderr, "init-config error: %v\n", err)
-				os.Exit(1)
+				fmt.Fprintf(stderr, "init-config error: %v\n", err)
+				return 1
 			}
-			fmt.Printf("Config written to: %s\n", path)
-			fmt.Println("Edit it then restart the server (or run with --config <path>).")
-			return
+			fmt.Fprintf(stdout, "Config written to: %s\n", path)
+			fmt.Fprintln(stdout, "Edit it then restart the server (or run with --config <path>).")
+			return 0
 		}
 	}
 
 	// Load config before commands and modes that consume runtime settings.
 	if _, err := config.Load(configPath); err != nil {
-		fmt.Fprintf(os.Stderr, "config error: %v\n", err)
-		os.Exit(1)
+		fmt.Fprintf(stderr, "config error: %v\n", err)
+		return 1
 	}
 
 	if len(filteredArgs) > 0 {
 		switch filteredArgs[0] {
 		case "--check":
-			runCheck()
-			return
+			return runCheck(stdout)
 		case "--validate-config":
 			cfg := config.Get()
 			data, _ := json.MarshalIndent(map[string]any{
@@ -107,18 +126,16 @@ func main() {
 				"alerting_enabled":    cfg.Alerting.Enabled,
 				"min_score_threshold": cfg.Alerting.MinScoreThreshold,
 			}, "", "  ")
-			fmt.Println(string(data))
-			fmt.Fprintln(os.Stderr, "Config valid.")
-			return
+			fmt.Fprintln(stdout, string(data))
+			fmt.Fprintln(stderr, "Config valid.")
+			return 0
 		case "--test-alert":
-			runTestAlert()
-			return
+			return runTestAlert(stdout, stderr)
 		case "--daemon":
-			runDaemon()
-			return
+			return runDaemon()
 		default:
-			printUsage(os.Stderr)
-			os.Exit(1)
+			printUsage(stderr)
+			return 1
 		}
 	}
 
@@ -131,9 +148,11 @@ func main() {
 
 	log.Printf("MCP-FlowSentinel %s — stdio transport ready", version)
 
-	if err := s.Run(ctx, &mcp.StdioTransport{}); err != nil {
-		log.Fatalf("fatal: %v", err)
+	if err := serveStdio(ctx, s); err != nil {
+		log.Printf("fatal: %v", err)
+		return 1
 	}
+	return 0
 }
 
 func printUsage(w io.Writer) {
@@ -156,7 +175,7 @@ func printUsage(w io.Writer) {
 // runDaemon starts the continuous monitoring loop alongside the MCP server.
 // The daemon captures rolling windows in the background while the MCP server
 // remains available on stdio for on-demand queries.
-func runDaemon() {
+func runDaemon() int {
 	intel.Init()
 
 	s := newMCPServer()
@@ -165,47 +184,50 @@ func runDaemon() {
 	defer cancel()
 
 	// Run daemon capture loop in background goroutine.
+	loop := runDaemonLoop
 	go func() {
-		if err := daemon.Run(ctx); err != nil {
+		if err := loop(ctx); err != nil {
 			log.Printf("daemon stopped: %v", err)
 		}
 	}()
 
 	log.Printf("MCP-FlowSentinel %s — daemon mode + stdio transport ready", version)
 
-	if err := s.Run(ctx, &mcp.StdioTransport{}); err != nil {
-		log.Fatalf("fatal: %v", err)
+	if err := serveStdio(ctx, s); err != nil {
+		log.Printf("fatal: %v", err)
+		return 1
 	}
+	return 0
 }
 
 // runCheck verifies pcap is accessible, prints available interfaces, and
 // attempts a brief live capture to confirm end-to-end capture functionality.
 // Privilege checks are delegated to the platform-specific checkPrivileges()
 // function (privileges_unix.go on Linux/macOS, privileges_windows.go on Windows).
-func runCheck() {
-	fmt.Printf("MCP-FlowSentinel %s — system check\n\n", version)
+func runCheck(stdout io.Writer) int {
+	fmt.Fprintf(stdout, "MCP-FlowSentinel %s — system check\n\n", version)
 
 	ok := true
 
 	// ── Privilege check (platform-specific) ──────────────────────────────────
-	if !checkPrivileges(os.Args[0]) {
+	if !checkPrivilegesFn(os.Args[0]) {
 		ok = false
 	}
 
 	// ── pcap interface enumeration ────────────────────────────────────────────
-	ifaces, err := capture.ListInterfaces()
+	ifaces, err := listInterfaces()
 	if err != nil {
-		fmt.Printf("[FAIL] Could not list pcap interfaces: %v\n", err)
-		fmt.Println()
-		fmt.Println("       Ensure the pcap library is installed:")
-		fmt.Println("         Linux  : sudo apt-get install libpcap-dev   (Debian/Ubuntu)")
-		fmt.Println("                  sudo dnf install libpcap-devel      (Fedora/RHEL)")
-		fmt.Println("         macOS  : brew install libpcap")
-		fmt.Println("         Windows: install Npcap from https://npcap.com/#download")
-		os.Exit(1)
+		fmt.Fprintf(stdout, "[FAIL] Could not list pcap interfaces: %v\n", err)
+		fmt.Fprintln(stdout)
+		fmt.Fprintln(stdout, "       Ensure the pcap library is installed:")
+		fmt.Fprintln(stdout, "         Linux  : sudo apt-get install libpcap-dev   (Debian/Ubuntu)")
+		fmt.Fprintln(stdout, "                  sudo dnf install libpcap-devel      (Fedora/RHEL)")
+		fmt.Fprintln(stdout, "         macOS  : brew install libpcap")
+		fmt.Fprintln(stdout, "         Windows: install Npcap from https://npcap.com/#download")
+		return 1
 	}
 
-	fmt.Printf("[OK] pcap available — %d interface(s) found:\n", len(ifaces))
+	fmt.Fprintf(stdout, "[OK] pcap available — %d interface(s) found:\n", len(ifaces))
 	for _, iface := range ifaces {
 		addrs := iface.Addresses
 		if len(addrs) == 0 {
@@ -215,7 +237,7 @@ func runCheck() {
 		if iface.Description != "" {
 			label = fmt.Sprintf("%s  (%s)", iface.Name, iface.Description)
 		}
-		fmt.Printf("       %-70s  flags=%-24v  addrs=%v\n", label, iface.Flags, addrs)
+		fmt.Fprintf(stdout, "       %-70s  flags=%-24v  addrs=%v\n", label, iface.Flags, addrs)
 	}
 
 	// ── Live capture smoke test (200 ms) ─────────────────────────────────────
@@ -247,44 +269,44 @@ func runCheck() {
 				break
 			}
 		}
-		fmt.Printf("\n[..] Testing live capture on %q (200 ms)...\n", label)
+		fmt.Fprintf(stdout, "\n[..] Testing live capture on %q (200 ms)...\n", label)
 		ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 		defer cancel()
-		pktCh, capErr := capture.CapturePackets(ctx, testIface, "")
+		pktCh, capErr := capturePackets(ctx, testIface, "")
 		if capErr != nil {
-			fmt.Printf("[FAIL] Capture test failed: %v\n", capErr)
-			fmt.Println("       Check privileges (see [WARN] above) and that pcap is installed.")
+			fmt.Fprintf(stdout, "[FAIL] Capture test failed: %v\n", capErr)
+			fmt.Fprintln(stdout, "       Check privileges (see [WARN] above) and that pcap is installed.")
 			ok = false
 		} else {
 			var count int
 			for range pktCh {
 				count++
 			}
-			fmt.Printf("[OK] Capture test succeeded — %d packet(s) observed in 200 ms.\n", count)
+			fmt.Fprintf(stdout, "[OK] Capture test succeeded — %d packet(s) observed in 200 ms.\n", count)
 		}
 	}
 
-	fmt.Println()
-	if ok {
-		fmt.Println("All checks passed. Run without flags to start the MCP server on stdio.")
-	} else {
-		fmt.Println("Some checks failed — see [WARN]/[FAIL] above.")
-		os.Exit(1)
+	fmt.Fprintln(stdout)
+	if !ok {
+		fmt.Fprintln(stdout, "Some checks failed — see [WARN]/[FAIL] above.")
+		return 1
 	}
+	fmt.Fprintln(stdout, "All checks passed. Run without flags to start the MCP server on stdio.")
+	return 0
 }
 
 // runTestAlert fires a synthetic webhook alert to verify alerting configuration.
 // It bypasses the dedup window so it always sends.
-func runTestAlert() {
+func runTestAlert(stdout, stderr io.Writer) int {
 	cfg := config.Get()
 	if !cfg.Alerting.Enabled {
-		fmt.Fprintln(os.Stderr, "[WARN] Alerting is disabled in config (alerting.enabled = false).")
-		fmt.Fprintln(os.Stderr, "       Set alerting.enabled: true and alerting.webhook_url to test.")
-		os.Exit(1)
+		fmt.Fprintln(stderr, "[WARN] Alerting is disabled in config (alerting.enabled = false).")
+		fmt.Fprintln(stderr, "       Set alerting.enabled: true and alerting.webhook_url to test.")
+		return 1
 	}
 	if cfg.Alerting.WebhookURL == "" {
-		fmt.Fprintln(os.Stderr, "[FAIL] alerting.webhook_url is not set.")
-		os.Exit(1)
+		fmt.Fprintln(stderr, "[FAIL] alerting.webhook_url is not set.")
+		return 1
 	}
 
 	testFlow := aggregate.FlowRecord{
@@ -299,9 +321,10 @@ func runTestAlert() {
 		SuspicionReasons: []string{"test alert — verify webhook connectivity"},
 	}
 
-	if err := alerting.FireTest(testFlow); err != nil {
-		fmt.Fprintf(os.Stderr, "[FAIL] Test alert failed: %v\n", err)
-		os.Exit(1)
+	if err := fireTestAlert(testFlow); err != nil {
+		fmt.Fprintf(stderr, "[FAIL] Test alert failed: %v\n", err)
+		return 1
 	}
-	fmt.Println("[OK] Test alert sent successfully.")
+	fmt.Fprintln(stdout, "[OK] Test alert sent successfully.")
+	return 0
 }
