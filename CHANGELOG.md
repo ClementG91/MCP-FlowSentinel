@@ -7,6 +7,7 @@ All notable changes to this project are documented in this file. The format is b
 ### Security
 
 - Built with Go 1.27.3, which fixes 11 standard library advisories reported by govulncheck (`net/http`, `crypto/tls`, `net/textproto`, `html/template`, HTTP/2). Minimum Go version in `go.mod`, build scripts, Makefile and CI is now 1.27.3.
+- CI staticcheck upgraded to v0.8.2 (v0.8.1 cannot read Go 1.27.3 export data).
 - Refreshed `golang.org/x/net` v0.61.0 (GO-2026-6603, 6610, 6611, 6612, 6617), `golang.org/x/crypto` v0.58.0, `golang.org/x/sys` v0.49.0, `golang.org/x/sync` v0.24.0, `golang.org/x/term` v0.47.0 and `golang.org/x/text` v0.43.0. `google.golang.org/grpc` stays pinned at v1.83.2.
 
 ### Documentation

@@ -161,7 +161,7 @@ jobs:
       - name: Validate shell scripts
         run: bash -n build-linux.sh build-macos.sh install.sh setup.sh
       - name: Run staticcheck
-        run: go run honnef.co/go/tools/cmd/staticcheck@v0.8.1 ./...
+        run: go run honnef.co/go/tools/cmd/staticcheck@v0.8.2 ./...
       - name: Run gosec
         # Exclusions cover required Windows syscall usage, best-effort cleanup,
         # executable permissions, and operator-selected local file paths.
