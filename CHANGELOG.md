@@ -4,11 +4,17 @@ All notable changes to this project are documented in this file. The format is b
 
 ## [Unreleased]
 
+## [0.3.3] - 2026-10-24
+
 ### Security
 
 - Built with Go 1.27.3, which fixes 11 standard library advisories reported by govulncheck (`net/http`, `crypto/tls`, `net/textproto`, `html/template`, HTTP/2). Minimum Go version in `go.mod`, build scripts, Makefile and CI is now 1.27.3.
 - CI staticcheck upgraded to v0.8.2 (v0.8.1 cannot read Go 1.27.3 export data).
 - Refreshed `golang.org/x/net` v0.61.0 (GO-2026-6603, 6610, 6611, 6612, 6617), `golang.org/x/crypto` v0.58.0, `golang.org/x/sys` v0.49.0, `golang.org/x/sync` v0.24.0, `golang.org/x/term` v0.47.0 and `golang.org/x/text` v0.43.0. `google.golang.org/grpc` stays pinned at v1.83.2.
+
+### Changed
+
+- GitHub Actions refreshed: `actions/upload-artifact` 7.0.2, `actions/download-artifact` 8.0.2, `github/codeql-action` 4.39.0, `anchore/sbom-action` 0.24.3 and `ossf/scorecard-action` 2.5.0.
 
 ### Documentation
 
@@ -105,7 +111,8 @@ All notable changes to this project are documented in this file. The format is b
 - Hardened packet parsers, filesystem operations, remote feed handling, webhook delivery, configuration validation, and update rollback behavior.
 - Reject malformed, unsupported, credential-bearing, and oversized webhook or threat-feed URLs before any outbound request.
 
-[Unreleased]: https://github.com/ClementG91/MCP-FlowSentinel/compare/v0.3.2...HEAD
+[Unreleased]: https://github.com/ClementG91/MCP-FlowSentinel/compare/v0.3.3...HEAD
+[0.3.3]: https://github.com/ClementG91/MCP-FlowSentinel/compare/v0.3.2...v0.3.3
 [0.3.2]: https://github.com/ClementG91/MCP-FlowSentinel/compare/v0.3.1...v0.3.2
 [0.3.1]: https://github.com/ClementG91/MCP-FlowSentinel/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/ClementG91/MCP-FlowSentinel/compare/v0.2.0...v0.3.0
