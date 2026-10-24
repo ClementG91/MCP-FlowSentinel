@@ -19,8 +19,8 @@ all: check-deps build
 ##############################################################################
 
 check-deps:
-	@echo "==> Checking Go version (need ≥ 1.27.1)..."
-	@go env GOVERSION | awk -F. '{major=$$1; sub(/^go/, "", major); patch=$$3+0; if (major < 1 || (major == 1 && ($$2 < 27 || ($$2 == 27 && patch < 1)))) {print "ERROR: Go 1.27.1+ required"; exit 1}}'
+	@echo "==> Checking Go version (need ≥ 1.27.3)..."
+	@go env GOVERSION | awk -F. '{major=$$1; sub(/^go/, "", major); patch=$$3+0; if (major < 1 || (major == 1 && ($$2 < 27 || ($$2 == 27 && patch < 3)))) {print "ERROR: Go 1.27.3+ required"; exit 1}}'
 
 	@echo "==> Checking libpcap headers..."
 	@test -f /usr/include/pcap.h \
