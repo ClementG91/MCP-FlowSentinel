@@ -6,6 +6,10 @@ All notable changes to this project are documented in this file. The format is b
 
 ### Documentation
 
+- Added a logo and two screenshots for the agent skill in `skills/flowsentinel/assets`.
+
+### Documentation
+
 - Added `skills/flowsentinel/SKILL.md`, an agent skill that explains when and how to use the FlowSentinel MCP tools.
 
 ## [0.3.3] - 2026-10-24
