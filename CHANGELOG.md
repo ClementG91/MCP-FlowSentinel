@@ -4,6 +4,10 @@ All notable changes to this project are documented in this file. The format is b
 
 ## [Unreleased]
 
+### Changed
+
+- Updated `github.com/sigstore/sigstore-go` to v1.4.0 (transient TUF, Fulcio and TSA retries, `ErrVerification` pointer-receiver fix) with its indirect dependencies, including `google.golang.org/grpc` v1.84.0 and `grpc-gateway` v2.32.0. `--update` verification behavior is unchanged.
+
 ### Documentation
 
 - Added `skills/flowsentinel/SKILL.md`, an agent skill that explains when and how to use the FlowSentinel MCP tools, with a logo and two screenshots in `skills/flowsentinel/assets`.
@@ -18,7 +22,7 @@ All notable changes to this project are documented in this file. The format is b
 
 ### Changed
 
-- GitHub Actions refreshed: `actions/upload-artifact` 7.0.2, `actions/download-artifact` 8.0.2, `github/codeql-action` 4.39.0, `anchore/sbom-action` 0.24.3 and `ossf/scorecard-action` 2.5.0.
+- GitHub Actions refreshed: `actions/upload-artifact` 7.0.2, `actions/download-artifact` 8.0.2, `github/codeql-action` 4.39.1, `anchore/sbom-action` 0.24.3 and `ossf/scorecard-action` 2.5.0.
 
 ### Documentation
 
